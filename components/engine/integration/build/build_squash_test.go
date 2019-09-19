@@ -11,9 +11,9 @@ import (
 	"github.com/docker/docker/api/types"
 	dclient "github.com/docker/docker/client"
 	"github.com/docker/docker/integration/internal/container"
-	"github.com/docker/docker/internal/test/daemon"
-	"github.com/docker/docker/internal/test/fakecontext"
 	"github.com/docker/docker/pkg/stdcopy"
+	"github.com/docker/docker/testutil/daemon"
+	"github.com/docker/docker/testutil/fakecontext"
 	"gotest.tools/assert"
 	is "gotest.tools/assert/cmp"
 	"gotest.tools/skip"
@@ -79,7 +79,7 @@ func TestBuildSquashParent(t *testing.T) {
 	resp.Body.Close()
 	assert.NilError(t, err)
 
-	cid := container.Run(t, ctx, client,
+	cid := container.Run(ctx, t, client,
 		container.WithImage(name),
 		container.WithCmd("/bin/sh", "-c", "cat /hello"),
 	)
@@ -94,13 +94,13 @@ func TestBuildSquashParent(t *testing.T) {
 	assert.NilError(t, err)
 	assert.Check(t, is.Equal(strings.TrimSpace(actualStdout.String()), "hello\nworld"))
 
-	container.Run(t, ctx, client,
+	container.Run(ctx, t, client,
 		container.WithImage(name),
 		container.WithCmd("/bin/sh", "-c", "[ ! -f /remove_me ]"),
 	)
-	container.Run(t, ctx, client,
+	container.Run(ctx, t, client,
 		container.WithImage(name),
-		container.WithCmd("/bin/sh", "-c", `[ "$(echo $HELLO)" == "world" ]`),
+		container.WithCmd("/bin/sh", "-c", `[ "$(echo $HELLO)" = "world" ]`),
 	)
 
 	origHistory, err := client.ImageHistory(ctx, origID)

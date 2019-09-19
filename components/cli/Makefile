@@ -12,7 +12,7 @@ clean: ## remove build artifacts
 
 .PHONY: test-unit
 test-unit: ## run unit tests, to change the output format use: GOTESTSUM_FORMAT=(dots|short|standard-quiet|short-verbose|standard-verbose) make test-unit 
-	gotestsum -- $(shell go list ./... | grep -vE '/vendor/|/e2e/')
+	gotestsum $(TESTFLAGS) -- $${TESTDIRS:-$(shell go list ./... | grep -vE '/vendor/|/e2e/')}
 
 .PHONY: test
 test: test-unit ## run tests
@@ -91,7 +91,7 @@ help: ## print this help
 cli/compose/schema/bindata.go: cli/compose/schema/data/*.json
 	go generate github.com/docker/cli/cli/compose/schema
 
-compose-jsonschema: cli/compose/schema/bindata.go
+compose-jsonschema: cli/compose/schema/bindata.go ## generate compose-file schemas
 	scripts/validate/check-git-diff cli/compose/schema/bindata.go
 
 .PHONY: ci-validate

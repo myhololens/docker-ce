@@ -31,15 +31,22 @@ func runPlugin(dockerCli *command.DockerCli, plugin *cobra.Command, meta manager
 	PersistentPreRunE = func(_ *cobra.Command, _ []string) error {
 		var err error
 		persistentPreRunOnce.Do(func() {
-			err = tcmd.Initialize(withPluginClientConn(plugin.Name()))
+			var opts []command.InitializeOpt
+			if os.Getenv("DOCKER_CLI_PLUGIN_USE_DIAL_STDIO") != "" {
+				opts = append(opts, withPluginClientConn(plugin.Name()))
+			}
+			err = tcmd.Initialize(opts...)
 		})
 		return err
 	}
 
-	cmd, _, err := tcmd.HandleGlobalFlags()
+	cmd, args, err := tcmd.HandleGlobalFlags()
 	if err != nil {
 		return err
 	}
+	// We've parsed global args already, so reset args to those
+	// which remain.
+	cmd.SetArgs(args)
 	return cmd.Execute()
 }
 
@@ -107,11 +114,14 @@ func newPluginCommand(dockerCli *command.DockerCli, plugin *cobra.Command, meta 
 	fullname := manager.NamePrefix + name
 
 	cmd := &cobra.Command{
-		Use:                   fmt.Sprintf("docker [OPTIONS] %s [ARG...]", name),
-		Short:                 fullname + " is a Docker CLI plugin",
-		SilenceUsage:          true,
-		SilenceErrors:         true,
-		PersistentPreRunE:     PersistentPreRunE,
+		Use:           fmt.Sprintf("docker [OPTIONS] %s [ARG...]", name),
+		Short:         fullname + " is a Docker CLI plugin",
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			// We can't use this as the hook directly since it is initialised later (in runPlugin)
+			return PersistentPreRunE(cmd, args)
+		},
 		TraverseChildren:      true,
 		DisableFlagsInUseLine: true,
 	}

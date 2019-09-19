@@ -41,7 +41,7 @@ func (container *Container) CreateSecretSymlinks() error {
 		if err != nil {
 			return err
 		}
-		if err := system.MkdirAll(filepath.Dir(resolvedPath), 0, ""); err != nil {
+		if err := system.MkdirAll(filepath.Dir(resolvedPath), 0); err != nil {
 			return err
 		}
 		if err := os.Symlink(filepath.Join(containerInternalSecretMountPath, r.SecretID), resolvedPath); err != nil {
@@ -91,7 +91,7 @@ func (container *Container) CreateConfigSymlinks() error {
 		if err != nil {
 			return err
 		}
-		if err := system.MkdirAll(filepath.Dir(resolvedPath), 0, ""); err != nil {
+		if err := system.MkdirAll(filepath.Dir(resolvedPath), 0); err != nil {
 			return err
 		}
 		if err := os.Symlink(filepath.Join(containerInternalConfigsDirPath, configRef.ConfigID), resolvedPath); err != nil {
@@ -153,7 +153,6 @@ func (container *Container) UpdateContainer(hostConfig *containertypes.HostConfi
 		resources.CpusetMems != "" ||
 		len(resources.Devices) != 0 ||
 		len(resources.DeviceCgroupRules) != 0 ||
-		resources.DiskQuota != 0 ||
 		resources.KernelMemory != 0 ||
 		resources.MemoryReservation != 0 ||
 		resources.MemorySwap != 0 ||
@@ -182,11 +181,6 @@ func (container *Container) BuildHostnameFile() error {
 	return nil
 }
 
-// EnableServiceDiscoveryOnDefaultNetwork Enable service discovery on default network
-func (container *Container) EnableServiceDiscoveryOnDefaultNetwork() bool {
-	return true
-}
-
 // GetMountPoints gives a platform specific transformation to types.MountPoint. Callers must hold a Container lock.
 func (container *Container) GetMountPoints() []types.MountPoint {
 	mountPoints := make([]types.MountPoint, 0, len(container.MountPoints))
@@ -208,6 +202,6 @@ func (container *Container) ConfigsDirPath() string {
 }
 
 // ConfigFilePath returns the path to the on-disk location of a config.
-func (container *Container) ConfigFilePath(configRef swarmtypes.ConfigReference) string {
-	return filepath.Join(container.ConfigsDirPath(), configRef.ConfigID)
+func (container *Container) ConfigFilePath(configRef swarmtypes.ConfigReference) (string, error) {
+	return filepath.Join(container.ConfigsDirPath(), configRef.ConfigID), nil
 }

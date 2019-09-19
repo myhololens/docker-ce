@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	nethttp "net/http"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/containerd/containerd/content"
@@ -25,6 +26,7 @@ import (
 	"github.com/moby/buildkit/executor"
 	"github.com/moby/buildkit/exporter"
 	localexporter "github.com/moby/buildkit/exporter/local"
+	tarexporter "github.com/moby/buildkit/exporter/tar"
 	"github.com/moby/buildkit/frontend"
 	gw "github.com/moby/buildkit/frontend/gateway/client"
 	"github.com/moby/buildkit/session"
@@ -42,6 +44,7 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	bolt "go.etcd.io/bbolt"
 )
 
 const labelCreatedAt = "buildkit/createdat"
@@ -165,6 +168,8 @@ func (w *Worker) ResolveOp(v solver.Vertex, s frontend.FrontendLLBBridge, sm *se
 			return ops.NewSourceOp(v, op, baseOp.Platform, w.SourceManager, sm, w)
 		case *pb.Op_Exec:
 			return ops.NewExecOp(v, op, baseOp.Platform, w.CacheManager, sm, w.MetadataStore, w.Executor, w)
+		case *pb.Op_File:
+			return ops.NewFileOp(v, op, w.CacheManager, w.MetadataStore, w)
 		case *pb.Op_Build:
 			return ops.NewBuildOp(v, op, s, w)
 		}
@@ -211,6 +216,10 @@ func (w *Worker) Exporter(name string, sm *session.Manager) (exporter.Exporter, 
 		return localexporter.New(localexporter.Opt{
 			SessionManager: sm,
 		})
+	case client.ExporterTar:
+		return tarexporter.New(tarexporter.Opt{
+			SessionManager: sm,
+		})
 	default:
 		return nil, errors.Errorf("exporter %q could not be found", name)
 	}
@@ -248,6 +257,47 @@ func (w *Worker) GetRemote(ctx context.Context, ref cache.ImmutableRef, createIf
 		Descriptors: descriptors,
 		Provider:    &emptyProvider{},
 	}, nil
+}
+
+// PruneCacheMounts removes the current cache snapshots for specified IDs
+func (w *Worker) PruneCacheMounts(ctx context.Context, ids []string) error {
+	mu := ops.CacheMountsLocker()
+	mu.Lock()
+	defer mu.Unlock()
+
+	for _, id := range ids {
+		id = "cache-dir:" + id
+		sis, err := w.MetadataStore.Search(id)
+		if err != nil {
+			return err
+		}
+		for _, si := range sis {
+			for _, k := range si.Indexes() {
+				if k == id || strings.HasPrefix(k, id+":") {
+					if siCached := w.CacheManager.Metadata(si.ID()); siCached != nil {
+						si = siCached
+					}
+					if err := cache.CachePolicyDefault(si); err != nil {
+						return err
+					}
+					si.Queue(func(b *bolt.Bucket) error {
+						return si.SetValue(b, k, nil)
+					})
+					if err := si.Commit(); err != nil {
+						return err
+					}
+					// if ref is unused try to clean it up right away by releasing it
+					if mref, err := w.CacheManager.GetMutable(ctx, si.ID()); err == nil {
+						go mref.Release(context.TODO())
+					}
+					break
+				}
+			}
+		}
+	}
+
+	ops.ClearActiveCacheMounts()
+	return nil
 }
 
 // FromRemote converts a remote snapshot reference to a local one
@@ -344,7 +394,7 @@ func (ld *layerDescriptor) Download(ctx context.Context, progressOutput pkgprogr
 	if err := contentutil.Copy(ctx, ld.w.ContentStore, ld.provider, ld.desc); err != nil {
 		return nil, 0, done(err)
 	}
-	done(nil)
+	_ = done(nil)
 
 	ra, err := ld.w.ContentStore.ReaderAt(ctx, ld.desc)
 	if err != nil {
@@ -393,13 +443,13 @@ func oneOffProgress(ctx context.Context, id string) func(err error) error {
 	st := progress.Status{
 		Started: &now,
 	}
-	pw.Write(id, st)
+	_ = pw.Write(id, st)
 	return func(err error) error {
 		// TODO: set error on status
 		now := time.Now()
 		st.Completed = &now
-		pw.Write(id, st)
-		pw.Close()
+		_ = pw.Write(id, st)
+		_ = pw.Close()
 		return err
 	}
 }

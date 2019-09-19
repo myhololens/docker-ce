@@ -10,7 +10,7 @@ import (
 
 func fullExampleConfig(workingDir, homeDir string) *types.Config {
 	return &types.Config{
-		Version:  "3.8",
+		Version:  "3.9",
 		Services: services(workingDir, homeDir),
 		Networks: networks(),
 		Volumes:  volumes(),
@@ -346,8 +346,12 @@ func services(workingDir, homeDir string) []types.ServiceConfig {
 			StdinOpen:       true,
 			StopSignal:      "SIGUSR1",
 			StopGracePeriod: durationPtr(20 * time.Second),
-			Tmpfs:           []string{"/run", "/tmp"},
-			Tty:             true,
+			Sysctls: map[string]string{
+				"net.core.somaxconn":      "1024",
+				"net.ipv4.tcp_syncookies": "0",
+			},
+			Tmpfs: []string{"/run", "/tmp"},
+			Tty:   true,
 			Ulimits: map[string]*types.UlimitsConfig{
 				"nproc": {
 					Single: 65535,
@@ -508,7 +512,7 @@ func secrets(workingDir string) map[string]types.SecretConfig {
 }
 
 func fullExampleYAML(workingDir string) string {
-	return fmt.Sprintf(`version: "3.8"
+	return fmt.Sprintf(`version: "3.9"
 services:
   foo:
     build:
@@ -756,6 +760,9 @@ services:
     stdin_open: true
     stop_grace_period: 20s
     stop_signal: SIGUSR1
+    sysctls:
+      net.core.somaxconn: "1024"
+      net.ipv4.tcp_syncookies: "0"
     tmpfs:
     - /run
     - /tmp
@@ -1325,6 +1332,10 @@ func fullExampleJSON(workingDir string) string {
       "stdin_open": true,
       "stop_grace_period": "20s",
       "stop_signal": "SIGUSR1",
+      "sysctls": {
+        "net.core.somaxconn": "1024",
+        "net.ipv4.tcp_syncookies": "0"
+      },
       "tmpfs": [
         "/run",
         "/tmp"
@@ -1386,7 +1397,7 @@ func fullExampleJSON(workingDir string) string {
       "working_dir": "/code"
     }
   },
-  "version": "3.8",
+  "version": "3.9",
   "volumes": {
     "another-volume": {
       "name": "user_specified_name",

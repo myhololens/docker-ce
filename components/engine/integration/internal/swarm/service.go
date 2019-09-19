@@ -10,8 +10,8 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	swarmtypes "github.com/docker/docker/api/types/swarm"
 	"github.com/docker/docker/client"
-	"github.com/docker/docker/internal/test/daemon"
-	"github.com/docker/docker/internal/test/environment"
+	"github.com/docker/docker/testutil/daemon"
+	"github.com/docker/docker/testutil/environment"
 	"gotest.tools/assert"
 	"gotest.tools/poll"
 	"gotest.tools/skip"
@@ -177,6 +177,14 @@ func ServiceWithSysctls(sysctls map[string]string) ServiceSpecOpt {
 	return func(spec *swarmtypes.ServiceSpec) {
 		ensureContainerSpec(spec)
 		spec.TaskTemplate.ContainerSpec.Sysctls = sysctls
+	}
+}
+
+// ServiceWithCapabilities sets the Capabilities option of the service's ContainerSpec.
+func ServiceWithCapabilities(Capabilities []string) ServiceSpecOpt {
+	return func(spec *swarmtypes.ServiceSpec) {
+		ensureContainerSpec(spec)
+		spec.TaskTemplate.ContainerSpec.Capabilities = Capabilities
 	}
 }
 

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -16,10 +15,15 @@ import (
 	"github.com/docker/cli/cli/version"
 	"github.com/docker/docker/api/types/versions"
 	"github.com/docker/docker/client"
+	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
+
+var allowedAliases = map[string]struct{}{
+	"builder": {},
+}
 
 func newDockerCommand(dockerCli *command.DockerCli) *cli.TopLevelCommand {
 	var (
@@ -65,14 +69,20 @@ func newDockerCommand(dockerCli *command.DockerCli) *cli.TopLevelCommand {
 	return cli.NewTopLevelCommand(cmd, dockerCli, opts, flags)
 }
 
-func setFlagErrorFunc(dockerCli *command.DockerCli, cmd *cobra.Command) {
+func setFlagErrorFunc(dockerCli command.Cli, cmd *cobra.Command) {
 	// When invoking `docker stack --nonsense`, we need to make sure FlagErrorFunc return appropriate
 	// output if the feature is not supported.
 	// As above cli.SetupRootCommand(cmd) have already setup the FlagErrorFunc, we will add a pre-check before the FlagErrorFunc
 	// is called.
 	flagErrorFunc := cmd.FlagErrorFunc()
 	cmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
+		if err := pluginmanager.AddPluginCommandStubs(dockerCli, cmd.Root()); err != nil {
+			return err
+		}
 		if err := isSupported(cmd, dockerCli); err != nil {
+			return err
+		}
+		if err := hideUnsupportedFeatures(cmd, dockerCli); err != nil {
 			return err
 		}
 		return flagErrorFunc(cmd, err)
@@ -204,6 +214,38 @@ func tryPluginRun(dockerCli command.Cli, cmd *cobra.Command, subcommand string) 
 	return nil
 }
 
+func processAliases(dockerCli command.Cli, cmd *cobra.Command, args, osArgs []string) ([]string, []string, error) {
+	aliasMap := dockerCli.ConfigFile().Aliases
+	aliases := make([][2][]string, 0, len(aliasMap))
+
+	for k, v := range aliasMap {
+		if _, ok := allowedAliases[k]; !ok {
+			return args, osArgs, errors.Errorf("Not allowed to alias %q. Allowed aliases: %#v", k, allowedAliases)
+		}
+		if _, _, err := cmd.Find(strings.Split(v, " ")); err == nil {
+			return args, osArgs, errors.Errorf("Not allowed to alias with builtin %q as target", v)
+		}
+		aliases = append(aliases, [2][]string{{k}, {v}})
+	}
+
+	if v, ok := aliasMap["builder"]; ok {
+		aliases = append(aliases,
+			[2][]string{{"build"}, {v, "build"}},
+			[2][]string{{"image", "build"}, {v, "build"}},
+		)
+	}
+	for _, al := range aliases {
+		var didChange bool
+		args, didChange = command.StringSliceReplaceAt(args, al[0], al[1], 0)
+		if didChange {
+			osArgs, _ = command.StringSliceReplaceAt(osArgs, al[0], al[1], -1)
+			break
+		}
+	}
+
+	return args, osArgs, nil
+}
+
 func runDocker(dockerCli *command.DockerCli) error {
 	tcmd := newDockerCommand(dockerCli)
 
@@ -213,6 +255,11 @@ func runDocker(dockerCli *command.DockerCli) error {
 	}
 
 	if err := tcmd.Initialize(); err != nil {
+		return err
+	}
+
+	args, os.Args, err = processAliases(dockerCli, cmd, args, os.Args)
+	if err != nil {
 		return err
 	}
 
@@ -228,6 +275,9 @@ func runDocker(dockerCli *command.DockerCli) error {
 		}
 	}
 
+	// We've parsed global args already, so reset args to those
+	// which remain.
+	cmd.SetArgs(args)
 	return cmd.Execute()
 }
 
@@ -365,7 +415,7 @@ func areFlagsSupported(cmd *cobra.Command, details versionDetails) error {
 				errs = append(errs, fmt.Sprintf("\"--%s\" is only supported on a Docker daemon with experimental features enabled", f.Name))
 			}
 			if _, ok := f.Annotations["experimentalCLI"]; ok && !hasExperimentalCLI {
-				errs = append(errs, fmt.Sprintf("\"--%s\" is on a Docker cli with experimental cli features enabled", f.Name))
+				errs = append(errs, fmt.Sprintf("\"--%s\" is only supported on a Docker cli with experimental cli features enabled", f.Name))
 			}
 			// buildkit-specific flags are noop when buildkit is not enabled, so we do not add an error in that case
 		}

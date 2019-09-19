@@ -16,8 +16,8 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/docker/swarmkit/api"
 	"github.com/docker/swarmkit/api/defaults"
-	shlex "github.com/flynn-archive/go-shlex"
 	gogotypes "github.com/gogo/protobuf/types"
+	"github.com/google/shlex"
 	"github.com/pkg/errors"
 	"github.com/spf13/pflag"
 )
@@ -331,12 +331,25 @@ func (c *credentialSpecOpt) Set(value string) error {
 	c.source = value
 	c.value = &swarm.CredentialSpec{}
 	switch {
+	case strings.HasPrefix(value, "config://"):
+		// NOTE(dperny): we allow the user to specify the value of
+		// CredentialSpec Config using the Name of the config, but the API
+		// requires the ID of the config. For simplicity, we will parse
+		// whatever value is provided into the "Config" field, but before
+		// making API calls, we may need to swap the Config Name for the ID.
+		// Therefore, this isn't the definitive location for the value of
+		// Config that is passed to the API.
+		c.value.Config = strings.TrimPrefix(value, "config://")
 	case strings.HasPrefix(value, "file://"):
 		c.value.File = strings.TrimPrefix(value, "file://")
 	case strings.HasPrefix(value, "registry://"):
 		c.value.Registry = strings.TrimPrefix(value, "registry://")
+	case value == "":
+		// if the value of the flag is an empty string, that means there is no
+		// CredentialSpec needed. This is useful for removing a CredentialSpec
+		// during a service update.
 	default:
-		return errors.New("Invalid credential spec - value must be prefixed file:// or registry:// followed by a value")
+		return errors.New(`invalid credential spec: value must be prefixed with "config://", "file://", or "registry://"`)
 	}
 
 	return nil
@@ -490,6 +503,7 @@ type serviceOptions struct {
 	dnsSearch       opts.ListOpts
 	dnsOption       opts.ListOpts
 	hosts           opts.ListOpts
+	sysctls         opts.ListOpts
 
 	resources resourceOptions
 	stopGrace opts.DurationOpt
@@ -520,9 +534,9 @@ type serviceOptions struct {
 
 func newServiceOptions() *serviceOptions {
 	return &serviceOptions{
-		labels:          opts.NewListOpts(opts.ValidateEnv),
+		labels:          opts.NewListOpts(opts.ValidateLabel),
 		constraints:     opts.NewListOpts(nil),
-		containerLabels: opts.NewListOpts(opts.ValidateEnv),
+		containerLabels: opts.NewListOpts(opts.ValidateLabel),
 		env:             opts.NewListOpts(opts.ValidateEnv),
 		envFile:         opts.NewListOpts(nil),
 		groups:          opts.NewListOpts(nil),
@@ -531,6 +545,7 @@ func newServiceOptions() *serviceOptions {
 		dnsOption:       opts.NewListOpts(nil),
 		dnsSearch:       opts.NewListOpts(opts.ValidateDNSSearch),
 		hosts:           opts.NewListOpts(opts.ValidateExtraHost),
+		sysctls:         opts.NewListOpts(nil),
 	}
 }
 
@@ -643,6 +658,7 @@ func (options *serviceOptions) ToService(ctx context.Context, apiClient client.N
 				StopGracePeriod: options.ToStopGracePeriod(flags),
 				Healthcheck:     healthConfig,
 				Isolation:       container.Isolation(options.isolation),
+				Sysctls:         opts.ConvertKVStringsToMap(options.sysctls.GetAll()),
 			},
 			Networks:      networks,
 			Resources:     resources,
@@ -660,7 +676,7 @@ func (options *serviceOptions) ToService(ctx context.Context, apiClient client.N
 		EndpointSpec:   options.endpoint.ToEndpointSpec(),
 	}
 
-	if options.credentialSpec.Value() != nil {
+	if options.credentialSpec.String() != "" && options.credentialSpec.Value() != nil {
 		service.TaskTemplate.ContainerSpec.Privileges = &swarm.Privileges{
 			CredentialSpec: options.credentialSpec.Value(),
 		}
@@ -890,6 +906,9 @@ const (
 	flagRollbackOrder           = "rollback-order"
 	flagRollbackParallelism     = "rollback-parallelism"
 	flagInit                    = "init"
+	flagSysCtl                  = "sysctl"
+	flagSysCtlAdd               = "sysctl-add"
+	flagSysCtlRemove            = "sysctl-rm"
 	flagStopGracePeriod         = "stop-grace-period"
 	flagStopSignal              = "stop-signal"
 	flagTTY                     = "tty"

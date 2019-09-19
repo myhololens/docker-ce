@@ -169,6 +169,12 @@ func (c *FakeCli) ErrBuffer() *bytes.Buffer {
 	return c.err
 }
 
+// ResetOutputBuffers resets the .OutBuffer() and.ErrBuffer() back to empty
+func (c *FakeCli) ResetOutputBuffers() {
+	c.outBuffer.Reset()
+	c.err.Reset()
+}
+
 // SetNotaryClient sets the internal getter for retrieving a NotaryClient
 func (c *FakeCli) SetNotaryClient(notaryClientFunc NotaryClientFuncType) {
 	c.notaryClientFunc = notaryClientFunc
@@ -223,4 +229,25 @@ func (c *FakeCli) NewContainerizedEngineClient(sockPath string) (clitypes.Contai
 // SetContainerizedEngineClient on the fake cli
 func (c *FakeCli) SetContainerizedEngineClient(containerizedEngineClientFunc containerizedEngineFuncType) {
 	c.containerizedEngineClientFunc = containerizedEngineClientFunc
+}
+
+// StackOrchestrator return the selected stack orchestrator
+func (c *FakeCli) StackOrchestrator(flagValue string) (command.Orchestrator, error) {
+	configOrchestrator := ""
+	if c.configfile != nil {
+		configOrchestrator = c.configfile.StackOrchestrator
+	}
+	ctxOrchestrator := ""
+	if c.currentContext != "" && c.contextStore != nil {
+		meta, err := c.contextStore.GetMetadata(c.currentContext)
+		if err != nil {
+			return "", err
+		}
+		context, err := command.GetDockerContext(meta)
+		if err != nil {
+			return "", err
+		}
+		ctxOrchestrator = string(context.StackOrchestrator)
+	}
+	return command.GetStackOrchestrator(flagValue, ctxOrchestrator, configOrchestrator, c.err)
 }

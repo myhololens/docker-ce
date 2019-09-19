@@ -9,7 +9,7 @@ import (
 
 	containerpkg "github.com/docker/docker/container"
 	"github.com/docker/docker/errdefs"
-	"github.com/docker/docker/libcontainerd"
+	libcontainerdtypes "github.com/docker/docker/libcontainerd/types"
 	"github.com/docker/docker/pkg/signal"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -63,8 +63,6 @@ func (daemon *Daemon) killWithSignal(container *containerpkg.Container, sig int)
 	logrus.Debugf("Sending kill signal %d to container %s", sig, container.ID)
 	container.Lock()
 	defer container.Unlock()
-
-	daemon.stopHealthchecks(container)
 
 	if !container.Running {
 		return errNotRunning(container.ID)
@@ -177,5 +175,5 @@ func (daemon *Daemon) killPossiblyDeadProcess(container *containerpkg.Container,
 }
 
 func (daemon *Daemon) kill(c *containerpkg.Container, sig int) error {
-	return daemon.containerd.SignalProcess(context.Background(), c.ID, libcontainerd.InitProcessName, sig)
+	return daemon.containerd.SignalProcess(context.Background(), c.ID, libcontainerdtypes.InitProcessName, sig)
 }

@@ -21,6 +21,7 @@ import (
 	"github.com/moby/buildkit/cache/metadata"
 	"github.com/moby/buildkit/cache/remotecache"
 	inlineremotecache "github.com/moby/buildkit/cache/remotecache/inline"
+	localremotecache "github.com/moby/buildkit/cache/remotecache/local"
 	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/control"
 	"github.com/moby/buildkit/frontend"
@@ -30,13 +31,14 @@ import (
 	"github.com/moby/buildkit/snapshot/blobmapping"
 	"github.com/moby/buildkit/solver/bboltcachestorage"
 	"github.com/moby/buildkit/util/binfmt_misc"
+	"github.com/moby/buildkit/util/entitlements"
 	"github.com/moby/buildkit/worker"
 	specs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 )
 
 func newController(rt http.RoundTripper, opt Opt) (*control.Controller, error) {
-	if err := os.MkdirAll(opt.Root, 0700); err != nil {
+	if err := os.MkdirAll(opt.Root, 0711); err != nil {
 		return nil, err
 	}
 
@@ -53,9 +55,10 @@ func newController(rt http.RoundTripper, opt Opt) (*control.Controller, error) {
 	}
 
 	sbase, err := snapshot.NewSnapshotter(snapshot.Opt{
-		GraphDriver: driver,
-		LayerStore:  dist.LayerStore,
-		Root:        root,
+		GraphDriver:     driver,
+		LayerStore:      dist.LayerStore,
+		Root:            root,
+		IdentityMapping: opt.IdentityMapping,
 	})
 	if err != nil {
 		return nil, err
@@ -110,7 +113,9 @@ func newController(rt http.RoundTripper, opt Opt) (*control.Controller, error) {
 		return nil, err
 	}
 
-	exec, err := newExecutor(root, opt.DefaultCgroupParent, opt.NetworkController, opt.Rootless)
+	dns := getDNSConfig(opt.DNSConfig)
+
+	exec, err := newExecutor(root, opt.DefaultCgroupParent, opt.NetworkController, dns, opt.Rootless, opt.IdentityMapping)
 	if err != nil {
 		return nil, err
 	}
@@ -185,9 +190,14 @@ func newController(rt http.RoundTripper, opt Opt) (*control.Controller, error) {
 		CacheKeyStorage:  cacheStorage,
 		ResolveCacheImporterFuncs: map[string]remotecache.ResolveCacheImporterFunc{
 			"registry": localinlinecache.ResolveCacheImporterFunc(opt.SessionManager, opt.ResolverOpt, dist.ReferenceStore, dist.ImageStore),
+			"local":    localremotecache.ResolveCacheImporterFunc(opt.SessionManager),
 		},
 		ResolveCacheExporterFuncs: map[string]remotecache.ResolveCacheExporterFunc{
 			"inline": inlineremotecache.ResolveCacheExporterFunc(),
+		},
+		Entitlements: []string{
+			string(entitlements.EntitlementNetworkHost),
+			// string(entitlements.EntitlementSecurityInsecure),
 		},
 	})
 }

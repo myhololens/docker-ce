@@ -174,13 +174,13 @@ flag's value is passed as arguments to the `go test` command. For example, from
 your local host you can run the `TestBuild` test with this command:
 
 ```bash
-$ TESTFLAGS='-check.f DockerSuite.TestBuild*' make test-integration
+$ TESTFLAGS='-test.run /DockerSuite/TestBuild*' make test-integration
 ```
 
 To run the same test inside your Docker development container, you do this:
 
 ```bash
-# TESTFLAGS='-check.f TestBuild*' hack/make.sh binary test-integration
+# TESTFLAGS='-test.run /DockerSuite/TestBuild*' hack/make.sh binary test-integration
 ```
 
 ## Test the Windows binary against a Linux daemon
@@ -228,15 +228,23 @@ run a Bash terminal on Windows.
     ```
 
     Should you wish to run a single test such as one with the name
-    'TestExample', you can pass in `TESTFLAGS='-check.f TestExample'`. For
+    'TestExample', you can pass in `TESTFLAGS='-test.run //TestExample'`. For
     example
 
     ```bash
-    $ TESTFLAGS='-check.f TestExample' hack/make.sh binary test-integration
+    $ TESTFLAGS='-test.run //TestExample' hack/make.sh binary test-integration
     ```
 
 You can now choose to make changes to the Moby source or the tests. If you
 make any changes, just run these commands again.
+
+## [Public CI infrastructure](ci.docker.com/public)
+
+The current infrastructure is maintained here: [Moby ci job](https://ci.docker.com/public/job/moby).  The Jenkins infrastructure is for the Moby project is maintained and
+managed by Docker Inc.  All contributions against the Jenkinsfile are
+appreciated and welcomed!  However we might not be able to fully provide the
+infrastructure to test against various architectures in our CI pipelines.  All
+jobs can be triggered and re-ran by the Moby maintainers
 
 ## Where to go next
 

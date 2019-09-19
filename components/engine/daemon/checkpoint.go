@@ -35,16 +35,16 @@ func getCheckpointDir(checkDir, checkpointID, ctrName, ctrID, ctrCheckpointDir s
 			err2 = os.MkdirAll(checkpointAbsDir, 0700)
 		case err != nil:
 			err2 = err
-		case err == nil:
+		default:
 			err2 = fmt.Errorf("%s exists and is not a directory", checkpointAbsDir)
 		}
 	} else {
 		switch {
 		case err != nil:
 			err2 = fmt.Errorf("checkpoint %s does not exist for container %s", checkpointID, ctrName)
-		case err == nil && stat.IsDir():
+		case stat.IsDir():
 			err2 = nil
-		case err == nil:
+		default:
 			err2 = fmt.Errorf("%s exists and is not a directory", checkpointAbsDir)
 		}
 	}
@@ -60,10 +60,6 @@ func (daemon *Daemon) CheckpointCreate(name string, config types.CheckpointCreat
 
 	if !container.IsRunning() {
 		return fmt.Errorf("Container %s not running", name)
-	}
-
-	if container.Config.Tty {
-		return fmt.Errorf("checkpoint not support on containers with tty")
 	}
 
 	if !validCheckpointNamePattern.MatchString(config.CheckpointID) {

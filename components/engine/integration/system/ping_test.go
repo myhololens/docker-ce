@@ -6,12 +6,13 @@ import (
 	"testing"
 
 	"github.com/docker/docker/api/types/versions"
-	"github.com/docker/docker/internal/test/request"
+	"github.com/docker/docker/testutil/request"
 	"gotest.tools/assert"
 	"gotest.tools/skip"
 )
 
 func TestPingCacheHeaders(t *testing.T) {
+	skip.If(t, versions.LessThan(testEnv.DaemonAPIVersion(), "1.40"), "skip test from new feature")
 	defer setupTest(t)()
 
 	res, _, err := request.Get("/_ping")

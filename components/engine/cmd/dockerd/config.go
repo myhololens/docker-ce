@@ -3,8 +3,10 @@ package main
 import (
 	"runtime"
 
+	"github.com/docker/docker/daemon"
 	"github.com/docker/docker/daemon/config"
 	"github.com/docker/docker/opts"
+	"github.com/docker/docker/plugin/executor/containerd"
 	"github.com/docker/docker/registry"
 	"github.com/spf13/pflag"
 )
@@ -12,6 +14,8 @@ import (
 const (
 	// defaultShutdownTimeout is the default shutdown timeout for the daemon
 	defaultShutdownTimeout = 15
+	// defaultTrustKeyFile is the default filename for the trust key
+	defaultTrustKeyFile = "key.json"
 )
 
 // installCommonConfigFlags adds flags to the pflag.FlagSet to configure the daemon
@@ -43,12 +47,12 @@ func installCommonConfigFlags(conf *config.Config, flags *pflag.FlagSet) error {
 
 	// "--graph" is "soft-deprecated" in favor of "data-root". This flag was added
 	// before Docker 1.0, so won't be removed, only hidden, to discourage its usage.
-	flags.MarkHidden("graph")
+	_ = flags.MarkHidden("graph")
 
 	flags.StringVar(&conf.Root, "data-root", defaultDataRoot, "Root directory of persistent Docker state")
 
 	flags.BoolVarP(&conf.AutoRestart, "restart", "r", true, "--restart on the daemon has been deprecated in favor of --restart policies on docker run")
-	flags.MarkDeprecated("restart", "Please use a restart policy on docker run")
+	_ = flags.MarkDeprecated("restart", "Please use a restart policy on docker run")
 
 	// Windows doesn't support setting the storage driver - there is no choice as to which ones to use.
 	if runtime.GOOS != "windows" {
@@ -71,7 +75,7 @@ func installCommonConfigFlags(conf *config.Config, flags *pflag.FlagSet) error {
 	flags.IntVar(&maxConcurrentUploads, "max-concurrent-uploads", config.DefaultMaxConcurrentUploads, "Set the max concurrent uploads for each push")
 	flags.IntVar(&conf.ShutdownTimeout, "shutdown-timeout", defaultShutdownTimeout, "Set the default shutdown timeout")
 	flags.IntVar(&conf.NetworkDiagnosticPort, "network-diagnostic-port", 0, "TCP port number of the network diagnostic server")
-	flags.MarkHidden("network-diagnostic-port")
+	_ = flags.MarkHidden("network-diagnostic-port")
 
 	flags.StringVar(&conf.SwarmDefaultAdvertiseAddr, "swarm-default-advertise-addr", "", "Set default address or interface for swarm advertised address")
 	flags.BoolVar(&conf.Experimental, "experimental", false, "Enable experimental features")
@@ -83,7 +87,13 @@ func installCommonConfigFlags(conf *config.Config, flags *pflag.FlagSet) error {
 
 	conf.MaxConcurrentDownloads = &maxConcurrentDownloads
 	conf.MaxConcurrentUploads = &maxConcurrentUploads
-	return nil
+
+	flags.StringVar(&conf.ContainerdNamespace, "containerd-namespace", daemon.ContainersNamespace, "Containerd namespace to use")
+	if err := flags.MarkHidden("containerd-namespace"); err != nil {
+		return err
+	}
+	flags.StringVar(&conf.ContainerdPluginNamespace, "containerd-plugins-namespace", containerd.PluginNamespace, "Containerd namespace to use for plugins")
+	return flags.MarkHidden("containerd-plugins-namespace")
 }
 
 func installRegistryServiceFlags(options *registry.ServiceOptions, flags *pflag.FlagSet) {

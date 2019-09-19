@@ -21,6 +21,7 @@ type CreateOptions struct {
 	DefaultStackOrchestrator string
 	Docker                   map[string]string
 	Kubernetes               map[string]string
+	From                     string
 }
 
 func longCreateDescription() string {
@@ -63,6 +64,7 @@ func newCreateCommand(dockerCli command.Cli) *cobra.Command {
 		"Default orchestrator for stack operations to use with this context (swarm|kubernetes|all)")
 	flags.StringToStringVar(&opts.Docker, "docker", nil, "set the docker endpoint")
 	flags.StringToStringVar(&opts.Kubernetes, "kubernetes", nil, "set the kubernetes endpoint")
+	flags.StringVar(&opts.From, "from", "", "create context from a named context")
 	return cmd
 }
 
@@ -76,17 +78,26 @@ func RunCreate(cli command.Cli, o *CreateOptions) error {
 	if err != nil {
 		return errors.Wrap(err, "unable to parse default-stack-orchestrator")
 	}
-	contextMetadata := store.ContextMetadata{
-		Endpoints: make(map[string]interface{}),
-		Metadata: command.DockerContext{
-			Description:       o.Description,
-			StackOrchestrator: stackOrchestrator,
-		},
-		Name: o.Name,
+	switch {
+	case o.From == "" && o.Docker == nil && o.Kubernetes == nil:
+		err = createFromExistingContext(s, cli.CurrentContext(), stackOrchestrator, o)
+	case o.From != "":
+		err = createFromExistingContext(s, o.From, stackOrchestrator, o)
+	default:
+		err = createNewContext(o, stackOrchestrator, cli, s)
 	}
+	if err == nil {
+		fmt.Fprintln(cli.Out(), o.Name)
+		fmt.Fprintf(cli.Err(), "Successfully created context %q\n", o.Name)
+	}
+	return err
+}
+
+func createNewContext(o *CreateOptions, stackOrchestrator command.Orchestrator, cli command.Cli, s store.Writer) error {
 	if o.Docker == nil {
 		return errors.New("docker endpoint configuration is required")
 	}
+	contextMetadata := newContextMetadata(stackOrchestrator, o)
 	contextTLSData := store.ContextTLSData{
 		Endpoints: make(map[string]store.EndpointTLSData),
 	}
@@ -116,26 +127,73 @@ func RunCreate(cli command.Cli, o *CreateOptions) error {
 	if err := validateEndpointsAndOrchestrator(contextMetadata); err != nil {
 		return err
 	}
-	if err := s.CreateOrUpdateContext(contextMetadata); err != nil {
+	if err := s.CreateOrUpdate(contextMetadata); err != nil {
 		return err
 	}
-	if err := s.ResetContextTLSMaterial(o.Name, &contextTLSData); err != nil {
+	if err := s.ResetTLSMaterial(o.Name, &contextTLSData); err != nil {
 		return err
 	}
-	fmt.Fprintln(cli.Out(), o.Name)
-	fmt.Fprintf(cli.Err(), "Successfully created context %q\n", o.Name)
 	return nil
 }
 
-func checkContextNameForCreation(s store.Store, name string) error {
+func checkContextNameForCreation(s store.Reader, name string) error {
 	if err := validateContextName(name); err != nil {
 		return err
 	}
-	if _, err := s.GetContextMetadata(name); !store.IsErrContextDoesNotExist(err) {
+	if _, err := s.GetMetadata(name); !store.IsErrContextDoesNotExist(err) {
 		if err != nil {
 			return errors.Wrap(err, "error while getting existing contexts")
 		}
 		return errors.Errorf("context %q already exists", name)
 	}
 	return nil
+}
+
+func createFromExistingContext(s store.ReaderWriter, fromContextName string, stackOrchestrator command.Orchestrator, o *CreateOptions) error {
+	if len(o.Docker) != 0 || len(o.Kubernetes) != 0 {
+		return errors.New("cannot use --docker or --kubernetes flags when --from is set")
+	}
+	reader := store.Export(fromContextName, &descriptionAndOrchestratorStoreDecorator{
+		Reader:       s,
+		description:  o.Description,
+		orchestrator: stackOrchestrator,
+	})
+	defer reader.Close()
+	return store.Import(o.Name, s, reader)
+}
+
+type descriptionAndOrchestratorStoreDecorator struct {
+	store.Reader
+	description  string
+	orchestrator command.Orchestrator
+}
+
+func (d *descriptionAndOrchestratorStoreDecorator) GetMetadata(name string) (store.Metadata, error) {
+	c, err := d.Reader.GetMetadata(name)
+	if err != nil {
+		return c, err
+	}
+	typedContext, err := command.GetDockerContext(c)
+	if err != nil {
+		return c, err
+	}
+	if d.description != "" {
+		typedContext.Description = d.description
+	}
+	if d.orchestrator != command.Orchestrator("") {
+		typedContext.StackOrchestrator = d.orchestrator
+	}
+	c.Metadata = typedContext
+	return c, nil
+}
+
+func newContextMetadata(stackOrchestrator command.Orchestrator, o *CreateOptions) store.Metadata {
+	return store.Metadata{
+		Endpoints: make(map[string]interface{}),
+		Metadata: command.DockerContext{
+			Description:       o.Description,
+			StackOrchestrator: stackOrchestrator,
+		},
+		Name: o.Name,
+	}
 }

@@ -28,6 +28,8 @@ type GrpcClient interface {
 }
 
 func New(ctx context.Context, opts map[string]string, session, product string, c pb.LLBBridgeClient, w []client.WorkerInfo) (GrpcClient, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
 	resp, err := c.Ping(ctx, &pb.PingRequest{})
 	if err != nil {
 		return nil, err
@@ -259,13 +261,33 @@ func (c *grpcClient) Solve(ctx context.Context, creq client.SolveRequest) (*clie
 			}
 		}
 	}
+	var (
+		// old API
+		legacyRegistryCacheImports []string
+		// new API (CapImportCaches)
+		cacheImports []*pb.CacheOptionsEntry
+	)
+	supportCapImportCaches := c.caps.Supports(pb.CapImportCaches) == nil
+	for _, im := range creq.CacheImports {
+		if !supportCapImportCaches && im.Type == "registry" {
+			legacyRegistryCacheImports = append(legacyRegistryCacheImports, im.Attrs["ref"])
+		} else {
+			cacheImports = append(cacheImports, &pb.CacheOptionsEntry{
+				Type:  im.Type,
+				Attrs: im.Attrs,
+			})
+		}
+	}
 
 	req := &pb.SolveRequest{
 		Definition:        creq.Definition,
 		Frontend:          creq.Frontend,
 		FrontendOpt:       creq.FrontendOpt,
-		ImportCacheRefs:   creq.ImportCacheRefs,
 		AllowResultReturn: true,
+		// old API
+		ImportCacheRefsDeprecated: legacyRegistryCacheImports,
+		// new API
+		CacheImports: cacheImports,
 	}
 
 	// backwards compatibility with inline return
@@ -356,6 +378,9 @@ func (r *reference) ReadFile(ctx context.Context, req client.ReadRequest) ([]byt
 }
 
 func (r *reference) ReadDir(ctx context.Context, req client.ReadDirRequest) ([]*fstypes.Stat, error) {
+	if err := r.c.caps.Supports(pb.CapReadDir); err != nil {
+		return nil, err
+	}
 	rdr := &pb.ReadDirRequest{
 		DirPath:        req.Path,
 		IncludePattern: req.IncludePattern,
@@ -369,6 +394,9 @@ func (r *reference) ReadDir(ctx context.Context, req client.ReadDirRequest) ([]*
 }
 
 func (r *reference) StatFile(ctx context.Context, req client.StatRequest) (*fstypes.Stat, error) {
+	if err := r.c.caps.Supports(pb.CapStatFile); err != nil {
+		return nil, err
+	}
 	rdr := &pb.StatFileRequest{
 		Path: req.Path,
 		Ref:  r.id,

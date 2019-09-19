@@ -50,6 +50,7 @@ func (s *systemRouter) getInfo(ctx context.Context, w http.ResponseWriter, r *ht
 	}
 	if s.cluster != nil {
 		info.Swarm = s.cluster.Info()
+		info.Warnings = append(info.Warnings, info.Swarm.Warnings...)
 	}
 
 	if versions.LessThan(httputils.VersionFromContext(ctx), "1.25") {
@@ -173,7 +174,9 @@ func (s *systemRouter) getEvents(ctx context.Context, w http.ResponseWriter, r *
 
 		if !onlyPastEvents {
 			dur := until.Sub(now)
-			timeout = time.After(dur)
+			timer := time.NewTimer(dur)
+			defer timer.Stop()
+			timeout = timer.C
 		}
 	}
 

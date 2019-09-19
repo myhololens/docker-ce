@@ -8,6 +8,7 @@ import (
 	"io/ioutil"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/containerd/containerd/content"
@@ -36,7 +37,7 @@ import (
 	"github.com/moby/buildkit/util/progress"
 	"github.com/moby/buildkit/util/resolver"
 	"github.com/moby/buildkit/util/tracing"
-	"github.com/opencontainers/go-digest"
+	digest "github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/identity"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
@@ -56,13 +57,15 @@ type SourceOpt struct {
 
 type imageSource struct {
 	SourceOpt
-	g flightcontrol.Group
+	g             flightcontrol.Group
+	resolverCache *resolverCache
 }
 
 // NewSource creates a new image source
 func NewSource(opt SourceOpt) (source.Source, error) {
 	is := &imageSource{
-		SourceOpt: opt,
+		SourceOpt:     opt,
+		resolverCache: newResolverCache(),
 	}
 
 	return is, nil
@@ -73,6 +76,10 @@ func (is *imageSource) ID() string {
 }
 
 func (is *imageSource) getResolver(ctx context.Context, rfn resolver.ResolveOptionsFunc, ref string, sm *session.Manager) remotes.Resolver {
+	if res := is.resolverCache.Get(ctx, ref); res != nil {
+		return res
+	}
+
 	opt := docker.ResolverOptions{
 		Client: tracing.DefaultClient,
 	}
@@ -81,6 +88,7 @@ func (is *imageSource) getResolver(ctx context.Context, rfn resolver.ResolveOpti
 	}
 	opt.Credentials = is.getCredentialsFromSession(ctx, sm)
 	r := docker.NewResolver(opt)
+	r = is.resolverCache.Add(ctx, ref, r)
 	return r
 }
 
@@ -127,7 +135,7 @@ func (is *imageSource) resolveRemote(ctx context.Context, ref string, platform *
 		dt   []byte
 	}
 	res, err := is.g.Do(ctx, ref, func(ctx context.Context) (interface{}, error) {
-		dgst, dt, err := imageutil.Config(ctx, ref, is.getResolver(ctx, is.ResolverOpt, ref, sm), is.ContentStore, platform)
+		dgst, dt, err := imageutil.Config(ctx, ref, is.getResolver(ctx, is.ResolverOpt, ref, sm), is.ContentStore, nil, platform)
 		if err != nil {
 			return nil, err
 		}
@@ -267,7 +275,7 @@ func (p *puller) resolve(ctx context.Context) error {
 		ref, err := distreference.ParseNormalizedNamed(p.src.Reference.String())
 		if err != nil {
 			p.resolveErr = err
-			resolveProgressDone(err)
+			_ = resolveProgressDone(err)
 			return
 		}
 
@@ -275,7 +283,7 @@ func (p *puller) resolve(ctx context.Context) error {
 			origRef, desc, err := p.resolver.Resolve(ctx, ref.String())
 			if err != nil {
 				p.resolveErr = err
-				resolveProgressDone(err)
+				_ = resolveProgressDone(err)
 				return
 			}
 
@@ -292,19 +300,19 @@ func (p *puller) resolve(ctx context.Context) error {
 			ref, err := distreference.WithDigest(ref, p.desc.Digest)
 			if err != nil {
 				p.resolveErr = err
-				resolveProgressDone(err)
+				_ = resolveProgressDone(err)
 				return
 			}
 			_, dt, err := p.is.ResolveImageConfig(ctx, ref.String(), gw.ResolveImageConfigOpt{Platform: &p.platform, ResolveMode: resolveModeToString(p.src.ResolveMode)}, p.sm)
 			if err != nil {
 				p.resolveErr = err
-				resolveProgressDone(err)
+				_ = resolveProgressDone(err)
 				return
 			}
 
 			p.config = dt
 		}
-		resolveProgressDone(nil)
+		_ = resolveProgressDone(nil)
 	})
 	return p.resolveErr
 }
@@ -321,7 +329,11 @@ func (p *puller) CacheKey(ctx context.Context, index int) (string, bool, error) 
 	}
 
 	if p.config != nil {
-		return cacheKeyFromConfig(p.config).String(), true, nil
+		k := cacheKeyFromConfig(p.config).String()
+		if k == "" {
+			return digest.FromBytes(p.config).String(), true, nil
+		}
+		return k, true, nil
 	}
 
 	if err := p.resolve(ctx); err != nil {
@@ -336,7 +348,16 @@ func (p *puller) CacheKey(ctx context.Context, index int) (string, bool, error) 
 		return dgst.String(), false, nil
 	}
 
-	return cacheKeyFromConfig(p.config).String(), true, nil
+	k := cacheKeyFromConfig(p.config).String()
+	if k == "" {
+		dgst, err := p.mainManifestKey(p.desc.Digest, p.platform)
+		if err != nil {
+			return "", false, err
+		}
+		return dgst.String(), true, nil
+	}
+
+	return k, true, nil
 }
 
 func (p *puller) Snapshot(ctx context.Context) (cache.ImmutableRef, error) {
@@ -382,6 +403,11 @@ func (p *puller) Snapshot(ctx context.Context) (cache.ImmutableRef, error) {
 	}
 
 	platform := platforms.Only(p.platform)
+	// workaround for GCR bug that requires a request to manifest endpoint for authentication to work.
+	// if current resolver has not used manifests do a dummy request.
+	// in most cases resolver should be cached and extra request is not needed.
+	ensureManifestRequested(ctx, p.resolver, p.ref)
+
 	var (
 		schema1Converter *schema1.Converter
 		handlers         []images.Handler
@@ -483,7 +509,7 @@ func (p *puller) Snapshot(ctx context.Context) (cache.ImmutableRef, error) {
 						tm := time.Now()
 						end = &tm
 					}
-					pw.Write("extracting "+p.ID, progress.Status{
+					_ = pw.Write("extracting "+p.ID, progress.Status{
 						Action:    "extract",
 						Started:   &st.st,
 						Completed: end,
@@ -519,10 +545,10 @@ func (p *puller) Snapshot(ctx context.Context) (cache.ImmutableRef, error) {
 
 	r := image.NewRootFS()
 	rootFS, release, err := p.is.DownloadManager.Download(ctx, *r, runtime.GOOS, layers, pkgprogress.ChanOutput(pchan))
+	stopProgress()
 	if err != nil {
 		return nil, err
 	}
-	stopProgress()
 
 	ref, err := p.is.CacheAccessor.GetFromSnapshotter(ctx, string(rootFS.ChainID()), cache.WithDescription(fmt.Sprintf("pulled from %s", p.ref)))
 	release()
@@ -646,7 +672,7 @@ func showProgress(ctx context.Context, ongoing *jobs, cs content.Store, pw progr
 			refKey := remotes.MakeRefKey(ctx, j.Descriptor)
 			if a, ok := actives[refKey]; ok {
 				started := j.started
-				pw.Write(j.Digest.String(), progress.Status{
+				_ = pw.Write(j.Digest.String(), progress.Status{
 					Action:  a.Status,
 					Total:   int(a.Total),
 					Current: int(a.Offset),
@@ -659,7 +685,7 @@ func showProgress(ctx context.Context, ongoing *jobs, cs content.Store, pw progr
 				info, err := cs.Info(context.TODO(), j.Digest)
 				if err != nil {
 					if containerderrors.IsNotFound(err) {
-						// pw.Write(j.Digest.String(), progress.Status{
+						// _ = pw.Write(j.Digest.String(), progress.Status{
 						// 	Action: "waiting",
 						// })
 						continue
@@ -671,7 +697,7 @@ func showProgress(ctx context.Context, ongoing *jobs, cs content.Store, pw progr
 				if done || j.done {
 					started := j.started
 					createdAt := info.CreatedAt
-					pw.Write(j.Digest.String(), progress.Status{
+					_ = pw.Write(j.Digest.String(), progress.Status{
 						Action:    "done",
 						Current:   int(info.Size),
 						Total:     int(info.Size),
@@ -757,13 +783,13 @@ func oneOffProgress(ctx context.Context, id string) func(err error) error {
 	st := progress.Status{
 		Started: &now,
 	}
-	pw.Write(id, st)
+	_ = pw.Write(id, st)
 	return func(err error) error {
 		// TODO: set error on status
 		now := time.Now()
 		st.Completed = &now
-		pw.Write(id, st)
-		pw.Close()
+		_ = pw.Write(id, st)
+		_ = pw.Close()
 		return err
 	}
 }
@@ -776,8 +802,8 @@ func cacheKeyFromConfig(dt []byte) digest.Digest {
 	if err != nil {
 		return digest.FromBytes(dt)
 	}
-	if img.RootFS.Type != "layers" {
-		return digest.FromBytes(dt)
+	if img.RootFS.Type != "layers" || len(img.RootFS.DiffIDs) == 0 {
+		return ""
 	}
 	return identity.ChainID(img.RootFS.DiffIDs)
 }
@@ -794,4 +820,91 @@ func resolveModeToString(rm source.ResolveMode) string {
 		return "local"
 	}
 	return ""
+}
+
+type resolverCache struct {
+	mu sync.Mutex
+	m  map[string]cachedResolver
+}
+
+type cachedResolver struct {
+	counter int64 // needs to be 64bit aligned for 32bit systems
+	timeout time.Time
+	remotes.Resolver
+}
+
+func (cr *cachedResolver) Resolve(ctx context.Context, ref string) (name string, desc ocispec.Descriptor, err error) {
+	atomic.AddInt64(&cr.counter, 1)
+	return cr.Resolver.Resolve(ctx, ref)
+}
+
+func (r *resolverCache) Add(ctx context.Context, ref string, resolver remotes.Resolver) remotes.Resolver {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	ref = r.repo(ref) + "-" + session.FromContext(ctx)
+
+	cr, ok := r.m[ref]
+	cr.timeout = time.Now().Add(time.Minute)
+	if ok {
+		return &cr
+	}
+
+	cr.Resolver = resolver
+	r.m[ref] = cr
+	return &cr
+}
+
+func (r *resolverCache) repo(refStr string) string {
+	ref, err := distreference.ParseNormalizedNamed(refStr)
+	if err != nil {
+		return refStr
+	}
+	return ref.Name()
+}
+
+func (r *resolverCache) Get(ctx context.Context, ref string) remotes.Resolver {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	ref = r.repo(ref) + "-" + session.FromContext(ctx)
+
+	cr, ok := r.m[ref]
+	if !ok {
+		return nil
+	}
+	return &cr
+}
+
+func (r *resolverCache) clean(now time.Time) {
+	r.mu.Lock()
+	for k, cr := range r.m {
+		if now.After(cr.timeout) {
+			delete(r.m, k)
+		}
+	}
+	r.mu.Unlock()
+}
+
+func newResolverCache() *resolverCache {
+	rc := &resolverCache{
+		m: map[string]cachedResolver{},
+	}
+	t := time.NewTicker(time.Minute)
+	go func() {
+		for {
+			rc.clean(<-t.C)
+		}
+	}()
+	return rc
+}
+
+func ensureManifestRequested(ctx context.Context, res remotes.Resolver, ref string) {
+	cr, ok := res.(*cachedResolver)
+	if !ok {
+		return
+	}
+	if atomic.LoadInt64(&cr.counter) == 0 {
+		res.Resolve(ctx, ref)
+	}
 }

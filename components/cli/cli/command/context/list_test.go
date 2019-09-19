@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/docker/cli/cli/command"
-	"github.com/docker/cli/cli/context/docker"
 	"gotest.tools/assert"
 	"gotest.tools/env"
 	"gotest.tools/golden"
@@ -18,7 +17,7 @@ func createTestContextWithKubeAndSwarm(t *testing.T, cli command.Cli, name strin
 		Name:                     name,
 		DefaultStackOrchestrator: orchestrator,
 		Description:              "description of " + name,
-		Kubernetes:               map[string]string{keyFromCurrent: "true"},
+		Kubernetes:               map[string]string{keyFrom: "default"},
 		Docker:                   map[string]string{keyHost: "https://someswarmserver"},
 	})
 	assert.NilError(t, err)
@@ -34,20 +33,6 @@ func TestList(t *testing.T) {
 	cli.OutBuffer().Reset()
 	assert.NilError(t, runList(cli, &listOptions{}))
 	golden.Assert(t, cli.OutBuffer().String(), "list.golden")
-}
-
-func TestListNoContext(t *testing.T) {
-	cli, cleanup := makeFakeCli(t)
-	defer cleanup()
-	defer env.Patch(t, "KUBECONFIG", "./testdata/test-kubeconfig")()
-	cli.SetDockerEndpoint(docker.Endpoint{
-		EndpointMeta: docker.EndpointMeta{
-			Host: "https://someswarmserver",
-		},
-	})
-	cli.OutBuffer().Reset()
-	assert.NilError(t, runList(cli, &listOptions{}))
-	golden.Assert(t, cli.OutBuffer().String(), "list.no-context.golden")
 }
 
 func TestListQuiet(t *testing.T) {

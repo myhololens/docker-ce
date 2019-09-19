@@ -78,9 +78,9 @@ func patchImageConfig(dt []byte, dps []digest.Digest, history []ocispec.History,
 	}
 
 	if cache != nil {
-		dt, err := json.Marshal(cache)
+		dt, err = json.Marshal(cache)
 		if err != nil {
-			return nil, err
+			return nil, errors.Wrap(err, "failed to marshal cache")
 		}
 		m["moby.buildkit.cache.v0"] = dt
 	}
@@ -137,6 +137,37 @@ func normalizeLayersAndHistory(diffs []digest.Digest, history []ocispec.History,
 		history[i] = h
 	}
 
+	// Find the first new layer time. Otherwise, the history item for a first
+	// metadata command would be the creation time of a base image layer.
+	// If there is no such then the last layer with timestamp.
+	var created *time.Time
+	var noCreatedTime bool
+	for _, h := range history {
+		if h.Created != nil {
+			created = h.Created
+			if noCreatedTime {
+				break
+			}
+		} else {
+			noCreatedTime = true
+		}
+	}
+
+	// Fill in created times for all history items to be either the first new
+	// layer time or the previous layer.
+	noCreatedTime = false
+	for i, h := range history {
+		if h.Created != nil {
+			if noCreatedTime {
+				created = h.Created
+			}
+		} else {
+			noCreatedTime = true
+			h.Created = created
+		}
+		history[i] = h
+	}
+
 	return diffs, history
 }
 
@@ -173,13 +204,13 @@ func oneOffProgress(ctx context.Context, id string) func(err error) error {
 	st := progress.Status{
 		Started: &now,
 	}
-	pw.Write(id, st)
+	_ = pw.Write(id, st)
 	return func(err error) error {
 		// TODO: set error on status
 		now := time.Now()
 		st.Completed = &now
-		pw.Write(id, st)
-		pw.Close()
+		_ = pw.Write(id, st)
+		_ = pw.Close()
 		return err
 	}
 }

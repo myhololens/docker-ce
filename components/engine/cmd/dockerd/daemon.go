@@ -21,6 +21,7 @@ import (
 	checkpointrouter "github.com/docker/docker/api/server/router/checkpoint"
 	"github.com/docker/docker/api/server/router/container"
 	distributionrouter "github.com/docker/docker/api/server/router/distribution"
+	grpcrouter "github.com/docker/docker/api/server/router/grpc"
 	"github.com/docker/docker/api/server/router/image"
 	"github.com/docker/docker/api/server/router/network"
 	pluginrouter "github.com/docker/docker/api/server/router/plugin"
@@ -90,6 +91,8 @@ func (cli *DaemonCli) start(opts *daemonOptions) (err error) {
 		return err
 	}
 
+	logrus.Info("Starting up")
+
 	cli.configFile = &opts.configFile
 	cli.flags = opts.flags
 
@@ -101,6 +104,12 @@ func (cli *DaemonCli) start(opts *daemonOptions) (err error) {
 		logrus.Warn("Running experimental build")
 		if cli.Config.IsRootless() {
 			logrus.Warn("Running in rootless mode. Cgroups, AppArmor, and CRIU are disabled.")
+		}
+		if rootless.RunningWithRootlessKit() {
+			logrus.Info("Running with RootlessKit integration")
+			if !cli.Config.IsRootless() {
+				return fmt.Errorf("rootless mode needs to be enabled for running with RootlessKit")
+			}
 		}
 	} else {
 		if cli.Config.IsRootless() {
@@ -124,7 +133,7 @@ func (cli *DaemonCli) start(opts *daemonOptions) (err error) {
 		return err
 	}
 
-	if err := system.MkdirAll(cli.Config.ExecRoot, 0700, ""); err != nil {
+	if err := system.MkdirAll(cli.Config.ExecRoot, 0700); err != nil {
 		return err
 	}
 
@@ -163,31 +172,13 @@ func (cli *DaemonCli) start(opts *daemonOptions) (err error) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	if cli.Config.ContainerdAddr == "" && runtime.GOOS != "windows" {
-		systemContainerdAddr, ok, err := systemContainerdRunning(cli.Config.IsRootless())
-		if err != nil {
-			cancel()
-			return errors.Wrap(err, "could not determine whether the system containerd is running")
-		}
-		if !ok {
-			opts, err := cli.getContainerdDaemonOpts()
-			if err != nil {
-				cancel()
-				return errors.Wrap(err, "failed to generate containerd options")
-			}
-
-			r, err := supervisor.Start(ctx, filepath.Join(cli.Config.Root, "containerd"), filepath.Join(cli.Config.ExecRoot, "containerd"), opts...)
-			if err != nil {
-				cancel()
-				return errors.Wrap(err, "failed to start containerd")
-			}
-			cli.Config.ContainerdAddr = r.Address()
-
-			// Try to wait for containerd to shutdown
-			defer r.WaitTimeout(10 * time.Second)
-		} else {
-			cli.Config.ContainerdAddr = systemContainerdAddr
-		}
+	waitForContainerDShutdown, err := cli.initContainerD(ctx)
+	if waitForContainerDShutdown != nil {
+		defer waitForContainerDShutdown(10 * time.Second)
+	}
+	if err != nil {
+		cancel()
+		return err
 	}
 	defer cancel()
 
@@ -217,14 +208,10 @@ func (cli *DaemonCli) start(opts *daemonOptions) (err error) {
 		return errors.Wrap(err, "failed to validate authorization plugin")
 	}
 
-	// TODO: move into startMetricsServer()
-	if cli.Config.MetricsAddress != "" {
-		if !d.HasExperimental() {
-			return errors.Wrap(err, "metrics-addr is only supported when experimental is enabled")
-		}
-		if err := startMetricsServer(cli.Config.MetricsAddress); err != nil {
-			return err
-		}
+	cli.d = d
+
+	if err := cli.startMetricsServer(cli.Config.MetricsAddress); err != nil {
+		return err
 	}
 
 	c, err := createAndStartCluster(cli, d)
@@ -238,8 +225,6 @@ func (cli *DaemonCli) start(opts *daemonOptions) (err error) {
 	d.RestartSwarmContainers()
 
 	logrus.Info("Daemon has completed initialization")
-
-	cli.d = d
 
 	routerOptions, err := newRouterOptions(cli.Config, d)
 	if err != nil {
@@ -277,6 +262,7 @@ func (cli *DaemonCli) start(opts *daemonOptions) (err error) {
 		return errors.Wrap(errAPI, "shutting down due to ServeAPI error")
 	}
 
+	logrus.Info("Daemon shutdown complete")
 	return nil
 }
 
@@ -326,6 +312,8 @@ func newRouterOptions(config *config.Config, d *daemon.Daemon) (routerOptions, e
 		ResolverOpt:         d.NewResolveOptionsFunc(),
 		BuilderConfig:       config.Builder,
 		Rootless:            d.Rootless(),
+		IdentityMapping:     d.IdentityMapping(),
+		DNSConfig:           config.DNSConfig,
 	})
 	if err != nil {
 		return opts, err
@@ -408,10 +396,14 @@ func shutdownDaemon(d *daemon.Daemon) {
 		logrus.Debug("Clean shutdown succeeded")
 		return
 	}
+
+	timeout := time.NewTimer(time.Duration(shutdownTimeout) * time.Second)
+	defer timeout.Stop()
+
 	select {
 	case <-ch:
 		logrus.Debug("Clean shutdown succeeded")
-	case <-time.After(time.Duration(shutdownTimeout) * time.Second):
+	case <-timeout.C:
 		logrus.Error("Force shutdown daemon")
 	}
 }
@@ -430,6 +422,14 @@ func loadDaemonCliConfig(opts *daemonOptions) (*config.Config, error) {
 		conf.CommonTLSOptions.CAFile = opts.TLSOptions.CAFile
 		conf.CommonTLSOptions.CertFile = opts.TLSOptions.CertFile
 		conf.CommonTLSOptions.KeyFile = opts.TLSOptions.KeyFile
+	}
+
+	if conf.TrustKeyPath == "" {
+		daemonConfDir, err := getDaemonConfDir(conf.Root)
+		if err != nil {
+			return nil, err
+		}
+		conf.TrustKeyPath = filepath.Join(daemonConfDir, defaultTrustKeyFile)
 	}
 
 	if flags.Changed("graph") && flags.Changed("data-root") {
@@ -501,6 +501,16 @@ func initRouter(opts routerOptions) {
 		swarmrouter.NewRouter(opts.cluster),
 		pluginrouter.NewRouter(opts.daemon.PluginManager()),
 		distributionrouter.NewRouter(opts.daemon.ImageService()),
+	}
+
+	grpcBackends := []grpcrouter.Backend{}
+	for _, b := range []interface{}{opts.daemon, opts.buildBackend} {
+		if b, ok := b.(grpcrouter.Backend); ok {
+			grpcBackends = append(grpcBackends, b)
+		}
+	}
+	if len(grpcBackends) > 0 {
+		routers = append(routers, grpcrouter.NewRouter(grpcBackends...))
 	}
 
 	if opts.daemon.NetworkControllerEnabled() {
@@ -596,11 +606,17 @@ func newAPIServerConfig(cli *DaemonCli) (*apiserver.Config, error) {
 
 func loadListeners(cli *DaemonCli, serverConfig *apiserver.Config) ([]string, error) {
 	var hosts []string
+	seen := make(map[string]struct{}, len(cli.Config.Hosts))
+
 	for i := 0; i < len(cli.Config.Hosts); i++ {
 		var err error
-		if cli.Config.Hosts[i], err = dopts.ParseHost(cli.Config.TLS, rootless.RunningWithNonRootUsername(), cli.Config.Hosts[i]); err != nil {
+		if cli.Config.Hosts[i], err = dopts.ParseHost(cli.Config.TLS, honorXDG, cli.Config.Hosts[i]); err != nil {
 			return nil, errors.Wrapf(err, "error parsing -H %s", cli.Config.Hosts[i])
 		}
+		if _, ok := seen[cli.Config.Hosts[i]]; ok {
+			continue
+		}
+		seen[cli.Config.Hosts[i]] = struct{}{}
 
 		protoAddr := cli.Config.Hosts[i]
 		protoAddrParts := strings.SplitN(protoAddr, "://", 2)
@@ -619,7 +635,6 @@ func loadListeners(cli *DaemonCli, serverConfig *apiserver.Config) ([]string, er
 		if err != nil {
 			return nil, err
 		}
-		ls = wrapListeners(proto, ls)
 		// If we're binding to a TCP port, make sure that a container doesn't try to use it.
 		if proto == "tcp" {
 			if err := allocateDaemonPort(addr); err != nil {
@@ -675,9 +690,9 @@ func validateAuthzPlugins(requestedPlugins []string, pg plugingetter.PluginGette
 	return nil
 }
 
-func systemContainerdRunning(isRootless bool) (string, bool, error) {
+func systemContainerdRunning(honorXDG bool) (string, bool, error) {
 	addr := containerddefaults.DefaultAddress
-	if isRootless {
+	if honorXDG {
 		runtimeDir, err := homedir.GetRuntimeDir()
 		if err != nil {
 			return "", false, err

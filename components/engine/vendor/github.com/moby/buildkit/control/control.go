@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	controlapi "github.com/moby/buildkit/api/services/control"
@@ -17,6 +18,7 @@ import (
 	"github.com/moby/buildkit/solver"
 	"github.com/moby/buildkit/solver/llbsolver"
 	"github.com/moby/buildkit/solver/pb"
+	"github.com/moby/buildkit/util/imageutil"
 	"github.com/moby/buildkit/util/throttle"
 	"github.com/moby/buildkit/worker"
 	"github.com/pkg/errors"
@@ -32,9 +34,11 @@ type Opt struct {
 	CacheKeyStorage           solver.CacheKeyStorage
 	ResolveCacheExporterFuncs map[string]remotecache.ResolveCacheExporterFunc
 	ResolveCacheImporterFuncs map[string]remotecache.ResolveCacheImporterFunc
+	Entitlements              []string
 }
 
 type Controller struct { // TODO: ControlService
+	buildCount       int64
 	opt              Opt
 	solver           *llbsolver.Solver
 	cache            solver.CacheManager
@@ -48,7 +52,7 @@ func NewController(opt Opt) (*Controller, error) {
 
 	gatewayForwarder := controlgateway.NewGatewayForwarder()
 
-	solver, err := llbsolver.New(opt.WorkerController, opt.Frontends, cache, opt.ResolveCacheImporterFuncs, gatewayForwarder, opt.SessionManager)
+	solver, err := llbsolver.New(opt.WorkerController, opt.Frontends, cache, opt.ResolveCacheImporterFuncs, gatewayForwarder, opt.SessionManager, opt.Entitlements)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create solver")
 	}
@@ -109,6 +113,10 @@ func (c *Controller) DiskUsage(ctx context.Context, r *controlapi.DiskUsageReque
 }
 
 func (c *Controller) Prune(req *controlapi.PruneRequest, stream controlapi.Control_PruneServer) error {
+	if atomic.LoadInt64(&c.buildCount) == 0 {
+		imageutil.CancelCacheLeases()
+	}
+
 	ch := make(chan client.UsageInfo)
 
 	eg, ctx := errgroup.WithContext(stream.Context())
@@ -206,6 +214,9 @@ func translateLegacySolveRequest(req *controlapi.SolveRequest) error {
 }
 
 func (c *Controller) Solve(ctx context.Context, req *controlapi.SolveRequest) (*controlapi.SolveResponse, error) {
+	atomic.AddInt64(&c.buildCount, 1)
+	defer atomic.AddInt64(&c.buildCount, -1)
+
 	if err := translateLegacySolveRequest(req); err != nil {
 		return nil, err
 	}

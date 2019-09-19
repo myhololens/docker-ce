@@ -227,13 +227,13 @@ func (daemon *Daemon) setupSecretDir(c *container.Container) (setupErr error) {
 		}
 	}
 
-	for _, ref := range c.ConfigReferences {
+	for _, configRef := range c.ConfigReferences {
 		// TODO (ehazlett): use type switch when more are supported
-		if ref.File == nil {
+		if configRef.File == nil {
 			// Runtime configs are not mounted into the container, but they're
 			// a valid type of config so we should not error when we encounter
 			// one.
-			if ref.Runtime == nil {
+			if configRef.Runtime == nil {
 				logrus.Error("config target type is not a file or runtime target")
 			}
 			// However, in any case, this isn't a file config, so we have no
@@ -241,7 +241,7 @@ func (daemon *Daemon) setupSecretDir(c *container.Container) (setupErr error) {
 			continue
 		}
 
-		fPath, err := c.ConfigFilePath(*ref)
+		fPath, err := c.ConfigFilePath(*configRef)
 		if err != nil {
 			return errors.Wrap(err, "error getting config file path for container")
 		}
@@ -250,22 +250,22 @@ func (daemon *Daemon) setupSecretDir(c *container.Container) (setupErr error) {
 		}
 
 		logrus.WithFields(logrus.Fields{
-			"name": ref.File.Name,
+			"name": configRef.File.Name,
 			"path": fPath,
 		}).Debug("injecting config")
-		config, err := c.DependencyStore.Configs().Get(ref.ConfigID)
+		config, err := c.DependencyStore.Configs().Get(configRef.ConfigID)
 		if err != nil {
 			return errors.Wrap(err, "unable to get config from config store")
 		}
-		if err := ioutil.WriteFile(fPath, config.Spec.Data, ref.File.Mode); err != nil {
+		if err := ioutil.WriteFile(fPath, config.Spec.Data, configRef.File.Mode); err != nil {
 			return errors.Wrap(err, "error injecting config")
 		}
 
-		uid, err := strconv.Atoi(ref.File.UID)
+		uid, err := strconv.Atoi(configRef.File.UID)
 		if err != nil {
 			return err
 		}
-		gid, err := strconv.Atoi(ref.File.GID)
+		gid, err := strconv.Atoi(configRef.File.GID)
 		if err != nil {
 			return err
 		}
@@ -273,7 +273,7 @@ func (daemon *Daemon) setupSecretDir(c *container.Container) (setupErr error) {
 		if err := os.Chown(fPath, rootIDs.UID+uid, rootIDs.GID+gid); err != nil {
 			return errors.Wrap(err, "error setting ownership for config")
 		}
-		if err := os.Chmod(fPath, ref.File.Mode); err != nil {
+		if err := os.Chmod(fPath, configRef.File.Mode); err != nil {
 			return errors.Wrap(err, "error setting file mode for config")
 		}
 	}
@@ -368,8 +368,9 @@ func enableIPOnPredefinedNetwork() bool {
 	return false
 }
 
-func (daemon *Daemon) isNetworkHotPluggable() bool {
-	return true
+// serviceDiscoveryOnDefaultNetwork indicates if service discovery is supported on the default network
+func serviceDiscoveryOnDefaultNetwork() bool {
+	return false
 }
 
 func (daemon *Daemon) setupPathsAndSandboxOptions(container *container.Container, sboxOptions *[]libnetwork.SandboxOption) error {
@@ -378,10 +379,10 @@ func (daemon *Daemon) setupPathsAndSandboxOptions(container *container.Container
 	if container.HostConfig.NetworkMode.IsHost() {
 		// Point to the host files, so that will be copied into the container running in host mode
 		*sboxOptions = append(*sboxOptions, libnetwork.OptionOriginHostsPath("/etc/hosts"))
-		*sboxOptions = append(*sboxOptions, libnetwork.OptionOriginResolvConfPath("/etc/resolv.conf"))
-	} else {
-		*sboxOptions = append(*sboxOptions, libnetwork.OptionOriginResolvConfPath(daemon.configStore.GetResolvConf()))
 	}
+
+	// Copy the host's resolv.conf for the container (/etc/resolv.conf or /run/systemd/resolve/resolv.conf)
+	*sboxOptions = append(*sboxOptions, libnetwork.OptionOriginResolvConfPath(daemon.configStore.GetResolvConf()))
 
 	container.HostsPath, err = container.GetRootResourcePath("hosts")
 	if err != nil {

@@ -4,6 +4,9 @@
 DOCKER_GRAPHDRIVER := $(if $(DOCKER_GRAPHDRIVER),$(DOCKER_GRAPHDRIVER),$(shell docker info 2>&1 | grep "Storage Driver" | sed 's/.*: //'))
 export DOCKER_GRAPHDRIVER
 
+# enable/disable cross-compile
+DOCKER_CROSS ?= false
+
 # get OS/Arch of docker engine
 DOCKER_OSARCH := $(shell bash -c 'source hack/make/.detect-daemon-osarch && echo $${DOCKER_ENGINE_OSARCH}')
 DOCKERFILE := $(shell bash -c 'source hack/make/.detect-daemon-osarch && echo $${DOCKERFILE}')
@@ -47,11 +50,18 @@ DOCKER_ENVS := \
 	-e DOCKER_PORT \
 	-e DOCKER_REMAP_ROOT \
 	-e DOCKER_STORAGE_OPTS \
+	-e DOCKER_TEST_HOST \
 	-e DOCKER_USERLANDPROXY \
 	-e DOCKERD_ARGS \
 	-e TEST_INTEGRATION_DIR \
+	-e TEST_SKIP_INTEGRATION \
+	-e TEST_SKIP_INTEGRATION_CLI \
+	-e TESTDEBUG \
 	-e TESTDIRS \
 	-e TESTFLAGS \
+	-e TESTFLAGS_INTEGRATION \
+	-e TESTFLAGS_INTEGRATION_CLI \
+	-e TEST_FILTER \
 	-e TIMEOUT \
 	-e VALIDATE_REPO \
 	-e VALIDATE_BRANCH \
@@ -76,6 +86,7 @@ BIND_DIR := $(if $(BINDDIR),$(BINDDIR),$(if $(DOCKER_HOST),,bundles))
 # DOCKER_MOUNT can be overriden, but use at your own risk!
 ifndef DOCKER_MOUNT
 DOCKER_MOUNT := $(if $(BIND_DIR),-v "$(CURDIR)/$(BIND_DIR):/go/src/github.com/docker/docker/$(BIND_DIR)")
+DOCKER_MOUNT := $(if $(DOCKER_BINDDIR_MOUNT_OPTS),$(DOCKER_MOUNT):$(DOCKER_BINDDIR_MOUNT_OPTS),$(DOCKER_MOUNT))
 
 # This allows the test suite to be able to run without worrying about the underlying fs used by the container running the daemon (e.g. aufs-on-aufs), so long as the host running the container is running a supported fs.
 # The volume will be cleaned up when the container is removed due to `--rm`.
@@ -102,9 +113,6 @@ export BUILD_APT_MIRROR
 
 SWAGGER_DOCS_PORT ?= 9000
 
-INTEGRATION_CLI_MASTER_IMAGE := $(if $(INTEGRATION_CLI_MASTER_IMAGE), $(INTEGRATION_CLI_MASTER_IMAGE), integration-cli-master)
-INTEGRATION_CLI_WORKER_IMAGE := $(if $(INTEGRATION_CLI_WORKER_IMAGE), $(INTEGRATION_CLI_WORKER_IMAGE), integration-cli-worker)
-
 define \n
 
 
@@ -116,9 +124,6 @@ endef
 INTERACTIVE := $(shell [ -t 0 ] && echo 1 || echo 0)
 ifeq ($(INTERACTIVE), 1)
 	DOCKER_FLAGS += -t
-endif
-ifeq ($(BIND_DIR), .)
-	DOCKER_BUILD_OPTS += --target=dev
 endif
 
 DOCKER_RUN_DOCKER := $(DOCKER_FLAGS) "$(DOCKER_IMAGE)"
@@ -134,9 +139,23 @@ binary: build ## build the linux binaries
 dynbinary: build ## build the linux dynbinaries
 	$(DOCKER_RUN_DOCKER) hack/make.sh dynbinary
 
+
+
+cross: DOCKER_CROSS := true
+cross: build ## cross build the binaries for darwin, freebsd and\nwindows
+	$(DOCKER_RUN_DOCKER) hack/make.sh dynbinary binary cross
+
+ifdef DOCKER_CROSSPLATFORMS
+build: DOCKER_CROSS := true
+endif
+ifeq ($(BIND_DIR), .)
+build: DOCKER_BUILD_OPTS += --target=dev
+endif
+build: DOCKER_BUILD_ARGS += --build-arg=CROSS=$(DOCKER_CROSS)
+build: DOCKER_BUILDKIT ?= 1
 build: bundles
 	$(warning The docker client CLI has moved to github.com/docker/cli. For a dev-test cycle involving the CLI, run:${\n} DOCKER_CLI_PATH=/host/path/to/cli/binary make shell ${\n} then change the cli and compile into a binary at the same location.${\n})
-	docker build ${BUILD_APT_MIRROR} ${DOCKER_BUILD_ARGS} ${DOCKER_BUILD_OPTS} -t "$(DOCKER_IMAGE)" -f "$(DOCKERFILE)" .
+	DOCKER_BUILDKIT="${DOCKER_BUILDKIT}" docker build --build-arg=GO_VERSION ${BUILD_APT_MIRROR} ${DOCKER_BUILD_ARGS} ${DOCKER_BUILD_OPTS} -t "$(DOCKER_IMAGE)" -f "$(DOCKERFILE)" .
 
 bundles:
 	mkdir bundles
@@ -147,9 +166,6 @@ clean: clean-cache
 .PHONY: clean-cache
 clean-cache:
 	docker volume rm -f docker-dev-cache
-
-cross: build ## cross build the binaries for darwin, freebsd and\nwindows
-	$(DOCKER_RUN_DOCKER) hack/make.sh dynbinary binary cross
 
 help: ## this help
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z0-9_-]+:.*?## / {gsub("\\\\n",sprintf("\n%22c",""), $$2);printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -171,8 +187,13 @@ test-docker-py: build ## run the docker-py tests
 
 test-integration-cli: test-integration ## (DEPRECATED) use test-integration
 
+ifneq ($(and $(TEST_SKIP_INTEGRATION),$(TEST_SKIP_INTEGRATION_CLI)),)
+test-integration:
+	@echo Both integrations suites skipped per environment variables
+else
 test-integration: build ## run the integration tests
 	$(DOCKER_RUN_DOCKER) hack/make.sh dynbinary test-integration
+endif
 
 test-integration-flaky: build ## run the stress test for all new integration tests
 	$(DOCKER_RUN_DOCKER) hack/make.sh dynbinary test-integration-flaky
@@ -201,18 +222,3 @@ swagger-docs: ## preview the API documentation
 		-e 'REDOC_OPTIONS=hide-hostname="true" lazy-rendering' \
 		-p $(SWAGGER_DOCS_PORT):80 \
 		bfirsh/redoc:1.6.2
-
-build-integration-cli-on-swarm: build ## build images and binary for running integration-cli on Swarm in parallel
-	@echo "Building hack/integration-cli-on-swarm (if build fails, please refer to hack/integration-cli-on-swarm/README.md)"
-	go build -buildmode=pie -o ./hack/integration-cli-on-swarm/integration-cli-on-swarm ./hack/integration-cli-on-swarm/host
-	@echo "Building $(INTEGRATION_CLI_MASTER_IMAGE)"
-	docker build -t $(INTEGRATION_CLI_MASTER_IMAGE) hack/integration-cli-on-swarm/agent
-	@echo "Building $(INTEGRATION_CLI_WORKER_IMAGE) from $(DOCKER_IMAGE)"
-	$(eval tmp := integration-cli-worker-tmp)
-# We mount pkgcache, but not bundle (bundle needs to be baked into the image)
-# For avoiding bakings DOCKER_GRAPHDRIVER and so on to image, we cannot use $(DOCKER_ENVS) here
-	docker run -t -d --name $(tmp) -e DOCKER_GITCOMMIT -e BUILDFLAGS --privileged $(DOCKER_IMAGE) top
-	docker exec $(tmp) hack/make.sh build-integration-test-binary dynbinary
-	docker exec $(tmp) go build -buildmode=pie -o /worker github.com/docker/docker/hack/integration-cli-on-swarm/agent/worker
-	docker commit -c 'ENTRYPOINT ["/worker"]' $(tmp) $(INTEGRATION_CLI_WORKER_IMAGE)
-	docker rm -f $(tmp)

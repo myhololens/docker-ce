@@ -10,7 +10,7 @@ import (
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/integration/internal/container"
-	"github.com/docker/docker/internal/test/daemon"
+	"github.com/docker/docker/testutil/daemon"
 	"gotest.tools/assert"
 	"gotest.tools/skip"
 )
@@ -33,7 +33,7 @@ func TestContinueAfterPluginCrash(t *testing.T) {
 
 	ctx, cancel = context.WithTimeout(context.Background(), 60*time.Second)
 
-	id := container.Run(t, ctx, client,
+	id := container.Run(ctx, t, client,
 		container.WithAutoRemove,
 		container.WithLogDriver("test"),
 		container.WithCmd(

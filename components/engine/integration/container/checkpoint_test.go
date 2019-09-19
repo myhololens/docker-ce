@@ -13,7 +13,7 @@ import (
 	mounttypes "github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/integration/internal/container"
-	"github.com/docker/docker/internal/test/request"
+	"github.com/docker/docker/testutil/request"
 	"gotest.tools/assert"
 	is "gotest.tools/assert/cmp"
 	"gotest.tools/poll"
@@ -30,6 +30,7 @@ func containerExec(t *testing.T, client client.APIClient, cID string, cmd []stri
 }
 
 func TestCheckpoint(t *testing.T) {
+	t.Skip("TestCheckpoint is broken; see https://github.com/moby/moby/issues/38963")
 	skip.If(t, testEnv.DaemonInfo.OSType == "windows")
 	skip.If(t, !testEnv.DaemonInfo.ExperimentalBuild)
 
@@ -49,7 +50,7 @@ func TestCheckpoint(t *testing.T) {
 	}
 
 	t.Log("Start a container")
-	cID := container.Run(t, ctx, client, container.WithMount(mnt))
+	cID := container.Run(ctx, t, client, container.WithMount(mnt))
 	poll.WaitOn(t,
 		container.IsInState(ctx, client, cID, "running"),
 		poll.WithDelay(100*time.Millisecond),

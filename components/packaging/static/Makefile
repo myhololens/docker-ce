@@ -1,14 +1,13 @@
-SHELL:=/bin/bash
-ENGINE_DIR:=$(CURDIR)/../../engine
-CLI_DIR:=$(CURDIR)/../../cli
-VERSION?=0.0.0-dev
-STATIC_VERSION=$(shell ./gen-static-ver $(ENGINE_DIR) $(VERSION))
+include ../common.mk
+
+CLI_DIR:=$(realpath $(CURDIR)/../../cli)
+ENGINE_DIR:=$(realpath $(CURDIR)/../../engine)
+STATIC_VERSION:=$(shell ./gen-static-ver $(ENGINE_DIR) $(VERSION))
 CHOWN=docker run --rm -v $(CURDIR):/v -w /v alpine chown
 HASH_CMD=docker run -v $(CURDIR):/sum -w /sum debian:jessie bash hash_files
 DIR_TO_HASH:=build/linux
-DEFAULT_PRODUCT_LICENSE?=Community Engine
-
-DOCKER_CLI_GOLANG_IMG=$(shell awk '$$1=="FROM"{split($$2,a,"-");print a[1];exit}' $(CLI_DIR)/dockerfiles/Dockerfile.dev)
+GO_VERSION=$(shell grep "ARG GO_VERSION" $(CLI_DIR)/dockerfiles/Dockerfile.dev | awk -F'=' '{print $$2}')
+DOCKER_CLI_GOLANG_IMG=golang:$(GO_VERSION)
 
 .PHONY: help
 help: ## show make targets
@@ -30,10 +29,10 @@ static-linux: static-cli static-engine ## create tgz with linux x86_64 client an
 		cp -L $(ENGINE_DIR)/bundles/binary-daemon/$$f build/linux/docker/$$f; \
 	done
 	tar -C build/linux -c -z -f build/linux/docker-$(STATIC_VERSION).tgz docker
-	
+
 	# extra binaries for running rootless
 	mkdir -p build/linux/docker-rootless-extras
-	for f in rootlesskit dockerd-rootless.sh vpnkit; do \
+	for f in rootlesskit rootlesskit-docker-proxy dockerd-rootless.sh vpnkit; do \
 		if [ -f $(ENGINE_DIR)/bundles/binary-daemon/$$f ]; then \
 			cp -L $(ENGINE_DIR)/bundles/binary-daemon/$$f build/linux/docker-rootless-extras/$$f; \
 		fi \
@@ -52,7 +51,7 @@ cross-mac: cross-all-cli cross-mac-plugins ## create tgz with darwin x86_64 clie
 	tar -C build/mac -c -z -f build/mac/docker-$(STATIC_VERSION).tgz docker
 
 .PHONY: cross-win
-cross-win: cross-all-cli cross-win-engine ## create zip file with windows x86_64 client and server
+cross-win: cross-all-cli cross-win-engine cross-win-plugins ## create zip file with windows x86_64 client and server
 	mkdir -p build/win/docker
 	cp $(CLI_DIR)/build/docker-windows-amd64 build/win/docker/docker.exe
 	cp $(ENGINE_DIR)/bundles/cross/windows/amd64/dockerd-$(STATIC_VERSION).exe build/win/docker/dockerd.exe
@@ -81,14 +80,25 @@ cross-all-cli:
 cross-win-engine:
 	$(MAKE) -C $(ENGINE_DIR) VERSION=$(STATIC_VERSION) DOCKER_CROSSPLATFORMS=windows/amd64 cross
 
-BUILD_MAC_RUN_VARS:=--rm -i \
-	-e GOOS=darwin \
-	-v "$(PWD)/build/mac/docker":/out \
-	-v "$(PWD)/../plugins":/plugins:ro \
-	-v "$(PWD)/scripts/build-mac-cli-plugins":/build:ro
+BUILD_PLUGIN_RUN_VARS = --rm -i \
+	-e GOOS=$(SPOOF_GOOS) \
+	-v "$(CURDIR)/build/$(CLI_BUILD_DIR)/docker/cli-plugins":/out \
+	-v "$(CURDIR)/../plugins":/plugins:ro \
+	-v "$(CURDIR)/scripts/build-cli-plugins":/build:ro
 
 .PHONY: cross-mac-plugins
+cross-mac-plugins: SPOOF_GOOS := darwin
+cross-mac-plugins: CLI_BUILD_DIR := mac
 cross-mac-plugins:
-	mkdir -p build/mac/docker
-	docker run $(BUILD_MAC_RUN_VARS) $(DOCKER_CLI_GOLANG_IMG) /build
+	mkdir -p build/$(CLI_BUILD_DIR)/docker
+	docker run $(BUILD_PLUGIN_RUN_VARS) $(DOCKER_CLI_GOLANG_IMG) /build
 	$(CHOWN) -R $(shell id -u):$(shell id -g) build
+
+.PHONY: cross-win-plugins
+cross-win-plugins: SPOOF_GOOS := windows
+cross-win-plugins: CLI_BUILD_DIR := win
+cross-win-plugins:
+	mkdir -p build/$(CLI_BUILD_DIR)/docker/cli-plugins
+	docker run $(BUILD_PLUGIN_RUN_VARS) $(DOCKER_CLI_GOLANG_IMG) /build
+	$(CHOWN) -R $(shell id -u):$(shell id -g) build
+	find build/$(CLI_BUILD_DIR)/docker -type f -not -name "*.exe" -exec mv {} {}.exe \;

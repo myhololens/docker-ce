@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"path"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	networktypes "github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/strslice"
 	"github.com/docker/docker/api/types/versions"
+	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/pkg/signal"
 	"github.com/docker/go-connections/nat"
 	"github.com/pkg/errors"
@@ -46,6 +48,7 @@ type containerOptions struct {
 	labels             opts.ListOpts
 	deviceCgroupRules  opts.ListOpts
 	devices            opts.ListOpts
+	gpus               opts.GpuOpts
 	ulimits            *opts.UlimitOpt
 	sysctls            *opts.MapOpts
 	publish            opts.ListOpts
@@ -96,7 +99,7 @@ type containerOptions struct {
 	ioMaxBandwidth     opts.MemBytes
 	ioMaxIOps          uint64
 	swappiness         int64
-	netMode            string
+	netMode            opts.NetworkOpt
 	macAddress         string
 	ipv4Address        string
 	ipv6Address        string
@@ -147,7 +150,7 @@ func addFlags(flags *pflag.FlagSet) *containerOptions {
 		expose:            opts.NewListOpts(nil),
 		extraHosts:        opts.NewListOpts(opts.ValidateExtraHost),
 		groupAdd:          opts.NewListOpts(nil),
-		labels:            opts.NewListOpts(nil),
+		labels:            opts.NewListOpts(opts.ValidateLabel),
 		labelsFile:        opts.NewListOpts(nil),
 		linkLocalIPs:      opts.NewListOpts(nil),
 		links:             opts.NewListOpts(opts.ValidateLink),
@@ -166,6 +169,8 @@ func addFlags(flags *pflag.FlagSet) *containerOptions {
 	flags.VarP(&copts.attach, "attach", "a", "Attach to STDIN, STDOUT or STDERR")
 	flags.Var(&copts.deviceCgroupRules, "device-cgroup-rule", "Add a rule to the cgroup allowed devices list")
 	flags.Var(&copts.devices, "device", "Add a host device to the container")
+	flags.Var(&copts.gpus, "gpus", "GPU devices to add to the container ('all' to pass all GPUs)")
+	flags.SetAnnotation("gpus", "version", []string{"1.40"})
 	flags.VarP(&copts.env, "env", "e", "Set environment variables")
 	flags.Var(&copts.envFile, "env-file", "Read in a file of environment variables")
 	flags.StringVar(&copts.entrypoint, "entrypoint", "", "Overwrite the default ENTRYPOINT of the image")
@@ -212,8 +217,8 @@ func addFlags(flags *pflag.FlagSet) *containerOptions {
 	flags.VarP(&copts.publish, "publish", "p", "Publish a container's port(s) to the host")
 	flags.BoolVarP(&copts.publishAll, "publish-all", "P", false, "Publish all exposed ports to random ports")
 	// We allow for both "--net" and "--network", although the latter is the recommended way.
-	flags.StringVar(&copts.netMode, "net", "default", "Connect a container to a network")
-	flags.StringVar(&copts.netMode, "network", "default", "Connect a container to a network")
+	flags.Var(&copts.netMode, "net", "Connect a container to a network")
+	flags.Var(&copts.netMode, "network", "Connect a container to a network")
 	flags.MarkHidden("net")
 	// We allow for both "--net-alias" and "--network-alias", although the latter is the recommended way.
 	flags.Var(&copts.aliases, "net-alias", "Add network-scoped alias for the container")
@@ -481,6 +486,8 @@ func parse(flags *pflag.FlagSet, copts *containerOptions, serverOS string) (*con
 		return nil, err
 	}
 
+	securityOpts, maskedPaths, readonlyPaths := parseSystemPaths(securityOpts)
+
 	storageOpts, err := parseStorageOpts(copts.storageOpt.GetAll())
 	if err != nil {
 		return nil, err
@@ -557,6 +564,7 @@ func parse(flags *pflag.FlagSet, copts *containerOptions, serverOS string) (*con
 		Ulimits:              copts.ulimits.GetList(),
 		DeviceCgroupRules:    copts.deviceCgroupRules.GetAll(),
 		Devices:              deviceMappings,
+		DeviceRequests:       copts.gpus.Value(),
 	}
 
 	config := &container.Config{
@@ -609,8 +617,8 @@ func parse(flags *pflag.FlagSet, copts *containerOptions, serverOS string) (*con
 		DNSOptions:     copts.dnsOptions.GetAllOrEmpty(),
 		ExtraHosts:     copts.extraHosts.GetAll(),
 		VolumesFrom:    copts.volumesFrom.GetAll(),
-		NetworkMode:    container.NetworkMode(copts.netMode),
 		IpcMode:        container.IpcMode(copts.ipcMode),
+		NetworkMode:    container.NetworkMode(copts.netMode.NetworkMode()),
 		PidMode:        pidMode,
 		UTSMode:        utsMode,
 		UsernsMode:     usernsMode,
@@ -630,6 +638,8 @@ func parse(flags *pflag.FlagSet, copts *containerOptions, serverOS string) (*con
 		Sysctls:        copts.sysctls.GetAll(),
 		Runtime:        copts.runtime,
 		Mounts:         mounts,
+		MaskedPaths:    maskedPaths,
+		ReadonlyPaths:  readonlyPaths,
 	}
 
 	if copts.autoRemove && !hostConfig.RestartPolicy.IsNone() {
@@ -650,39 +660,9 @@ func parse(flags *pflag.FlagSet, copts *containerOptions, serverOS string) (*con
 		EndpointsConfig: make(map[string]*networktypes.EndpointSettings),
 	}
 
-	if copts.ipv4Address != "" || copts.ipv6Address != "" || copts.linkLocalIPs.Len() > 0 {
-		epConfig := &networktypes.EndpointSettings{}
-		networkingConfig.EndpointsConfig[string(hostConfig.NetworkMode)] = epConfig
-
-		epConfig.IPAMConfig = &networktypes.EndpointIPAMConfig{
-			IPv4Address: copts.ipv4Address,
-			IPv6Address: copts.ipv6Address,
-		}
-
-		if copts.linkLocalIPs.Len() > 0 {
-			epConfig.IPAMConfig.LinkLocalIPs = make([]string, copts.linkLocalIPs.Len())
-			copy(epConfig.IPAMConfig.LinkLocalIPs, copts.linkLocalIPs.GetAll())
-		}
-	}
-
-	if hostConfig.NetworkMode.IsUserDefined() && len(hostConfig.Links) > 0 {
-		epConfig := networkingConfig.EndpointsConfig[string(hostConfig.NetworkMode)]
-		if epConfig == nil {
-			epConfig = &networktypes.EndpointSettings{}
-		}
-		epConfig.Links = make([]string, len(hostConfig.Links))
-		copy(epConfig.Links, hostConfig.Links)
-		networkingConfig.EndpointsConfig[string(hostConfig.NetworkMode)] = epConfig
-	}
-
-	if copts.aliases.Len() > 0 {
-		epConfig := networkingConfig.EndpointsConfig[string(hostConfig.NetworkMode)]
-		if epConfig == nil {
-			epConfig = &networktypes.EndpointSettings{}
-		}
-		epConfig.Aliases = make([]string, copts.aliases.Len())
-		copy(epConfig.Aliases, copts.aliases.GetAll())
-		networkingConfig.EndpointsConfig[string(hostConfig.NetworkMode)] = epConfig
+	networkingConfig.EndpointsConfig, err = parseNetworkOpts(copts)
+	if err != nil {
+		return nil, err
 	}
 
 	return &containerConfig{
@@ -690,6 +670,121 @@ func parse(flags *pflag.FlagSet, copts *containerOptions, serverOS string) (*con
 		HostConfig:       hostConfig,
 		NetworkingConfig: networkingConfig,
 	}, nil
+}
+
+// parseNetworkOpts converts --network advanced options to endpoint-specs, and combines
+// them with the old --network-alias and --links. If returns an error if conflicting options
+// are found.
+//
+// this function may return _multiple_ endpoints, which is not currently supported
+// by the daemon, but may be in future; it's up to the daemon to produce an error
+// in case that is not supported.
+func parseNetworkOpts(copts *containerOptions) (map[string]*networktypes.EndpointSettings, error) {
+	var (
+		endpoints                         = make(map[string]*networktypes.EndpointSettings, len(copts.netMode.Value()))
+		hasUserDefined, hasNonUserDefined bool
+	)
+
+	for i, n := range copts.netMode.Value() {
+		if container.NetworkMode(n.Target).IsUserDefined() {
+			hasUserDefined = true
+		} else {
+			hasNonUserDefined = true
+		}
+		if i == 0 {
+			// The first network corresponds with what was previously the "only"
+			// network, and what would be used when using the non-advanced syntax
+			// `--network-alias`, `--link`, `--ip`, `--ip6`, and `--link-local-ip`
+			// are set on this network, to preserve backward compatibility with
+			// the non-advanced notation
+			if err := applyContainerOptions(&n, copts); err != nil {
+				return nil, err
+			}
+		}
+		ep, err := parseNetworkAttachmentOpt(n)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := endpoints[n.Target]; ok {
+			return nil, errdefs.InvalidParameter(errors.Errorf("network %q is specified multiple times", n.Target))
+		}
+
+		// For backward compatibility: if no custom options are provided for the network,
+		// and only a single network is specified, omit the endpoint-configuration
+		// on the client (the daemon will still create it when creating the container)
+		if i == 0 && len(copts.netMode.Value()) == 1 {
+			if ep == nil || reflect.DeepEqual(*ep, networktypes.EndpointSettings{}) {
+				continue
+			}
+		}
+		endpoints[n.Target] = ep
+	}
+	if hasUserDefined && hasNonUserDefined {
+		return nil, errdefs.InvalidParameter(errors.New("conflicting options: cannot attach both user-defined and non-user-defined network-modes"))
+	}
+	return endpoints, nil
+}
+
+func applyContainerOptions(n *opts.NetworkAttachmentOpts, copts *containerOptions) error {
+	// TODO should copts.MacAddress actually be set on the first network? (currently it's not)
+	// TODO should we error if _any_ advanced option is used? (i.e. forbid to combine advanced notation with the "old" flags (`--network-alias`, `--link`, `--ip`, `--ip6`)?
+	if len(n.Aliases) > 0 && copts.aliases.Len() > 0 {
+		return errdefs.InvalidParameter(errors.New("conflicting options: cannot specify both --network-alias and per-network alias"))
+	}
+	if len(n.Links) > 0 && copts.links.Len() > 0 {
+		return errdefs.InvalidParameter(errors.New("conflicting options: cannot specify both --link and per-network links"))
+	}
+	if copts.aliases.Len() > 0 {
+		n.Aliases = make([]string, copts.aliases.Len())
+		copy(n.Aliases, copts.aliases.GetAll())
+	}
+	if copts.links.Len() > 0 {
+		n.Links = make([]string, copts.links.Len())
+		copy(n.Links, copts.links.GetAll())
+	}
+
+	// TODO add IPv4/IPv6 options to the csv notation for --network, and error-out in case of conflicting options
+	n.IPv4Address = copts.ipv4Address
+	n.IPv6Address = copts.ipv6Address
+
+	// TODO should linkLocalIPs be added to the _first_ network only, or to _all_ networks? (should this be a per-network option as well?)
+	if copts.linkLocalIPs.Len() > 0 {
+		n.LinkLocalIPs = make([]string, copts.linkLocalIPs.Len())
+		copy(n.LinkLocalIPs, copts.linkLocalIPs.GetAll())
+	}
+	return nil
+}
+
+func parseNetworkAttachmentOpt(ep opts.NetworkAttachmentOpts) (*networktypes.EndpointSettings, error) {
+	if strings.TrimSpace(ep.Target) == "" {
+		return nil, errors.New("no name set for network")
+	}
+	if !container.NetworkMode(ep.Target).IsUserDefined() {
+		if len(ep.Aliases) > 0 {
+			return nil, errors.New("network-scoped aliases are only supported for user-defined networks")
+		}
+		if len(ep.Links) > 0 {
+			return nil, errors.New("links are only supported for user-defined networks")
+		}
+	}
+
+	epConfig := &networktypes.EndpointSettings{}
+	epConfig.Aliases = append(epConfig.Aliases, ep.Aliases...)
+	if len(ep.DriverOpts) > 0 {
+		epConfig.DriverOpts = make(map[string]string)
+		epConfig.DriverOpts = ep.DriverOpts
+	}
+	if len(ep.Links) > 0 {
+		epConfig.Links = ep.Links
+	}
+	if ep.IPv4Address != "" || ep.IPv6Address != "" || len(ep.LinkLocalIPs) > 0 {
+		epConfig.IPAMConfig = &networktypes.EndpointIPAMConfig{
+			IPv4Address:  ep.IPv4Address,
+			IPv6Address:  ep.IPv6Address,
+			LinkLocalIPs: ep.LinkLocalIPs,
+		}
+	}
+	return epConfig, nil
 }
 
 func parsePortOpts(publishOpts []string) ([]string, error) {
@@ -742,6 +837,25 @@ func parseSecurityOpts(securityOpts []string) ([]string, error) {
 	}
 
 	return securityOpts, nil
+}
+
+// parseSystemPaths checks if `systempaths=unconfined` security option is set,
+// and returns the `MaskedPaths` and `ReadonlyPaths` accordingly. An updated
+// list of security options is returned with this option removed, because the
+// `unconfined` option is handled client-side, and should not be sent to the
+// daemon.
+func parseSystemPaths(securityOpts []string) (filtered, maskedPaths, readonlyPaths []string) {
+	filtered = securityOpts[:0]
+	for _, opt := range securityOpts {
+		if opt == "systempaths=unconfined" {
+			maskedPaths = []string{}
+			readonlyPaths = []string{}
+		} else {
+			filtered = append(filtered, opt)
+		}
+	}
+
+	return filtered, maskedPaths, readonlyPaths
 }
 
 // parses storage options per container into a map

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -23,7 +24,7 @@ import (
 	"github.com/docker/docker/pkg/progress"
 	"github.com/docker/docker/pkg/stringid"
 	"github.com/docker/docker/registry"
-	"github.com/opencontainers/go-digest"
+	digest "github.com/opencontainers/go-digest"
 	"github.com/sirupsen/logrus"
 )
 
@@ -180,8 +181,30 @@ func (p *v2Pusher) pushV2Tag(ctx context.Context, ref reference.NamedTagged, id 
 
 	putOptions := []distribution.ManifestServiceOption{distribution.WithTag(ref.Tag())}
 	if _, err = manSvc.Put(ctx, manifest, putOptions...); err != nil {
-		logrus.Warnf("failed to upload schema2 manifest: %v", err)
-		return err
+		if runtime.GOOS == "windows" || p.config.TrustKey == nil || p.config.RequireSchema2 {
+			logrus.Warnf("failed to upload schema2 manifest: %v", err)
+			return err
+		}
+
+		logrus.Warnf("failed to upload schema2 manifest: %v - falling back to schema1", err)
+
+		msg := fmt.Sprintf("[DEPRECATION NOTICE] registry v2 schema1 support will be removed in an upcoming release. Please contact admins of the %s registry NOW to avoid future disruption. More information at https://docs.docker.com/registry/spec/deprecated-schema-v1/", reference.Domain(ref))
+		logrus.Warn(msg)
+		progress.Message(p.config.ProgressOutput, "", msg)
+
+		manifestRef, err := reference.WithTag(p.repo.Named(), ref.Tag())
+		if err != nil {
+			return err
+		}
+		builder = schema1.NewConfigManifestBuilder(p.repo.Blobs(ctx), p.config.TrustKey, manifestRef, imgConfig)
+		manifest, err = manifestFromBuilder(ctx, builder, descriptors)
+		if err != nil {
+			return err
+		}
+
+		if _, err = manSvc.Put(ctx, manifest, putOptions...); err != nil {
+			return err
+		}
 	}
 
 	var canonicalManifest []byte
@@ -649,7 +672,6 @@ func (bla byLikeness) Swap(i, j int) {
 }
 func (bla byLikeness) Len() int { return len(bla.arr) }
 
-// nolint: interfacer
 func sortV2MetadataByLikenessAndAge(repoInfo reference.Named, hmacKey []byte, marr []metadata.V2Metadata) {
 	// reverse the metadata array to shift the newest entries to the beginning
 	for i := 0; i < len(marr)/2; i++ {

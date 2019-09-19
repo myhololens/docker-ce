@@ -12,7 +12,6 @@ import (
 	"github.com/docker/docker/container"
 	"github.com/docker/docker/daemon/config"
 	"github.com/docker/docker/pkg/containerfs"
-	"github.com/docker/docker/pkg/fileutils"
 	"github.com/docker/docker/pkg/idtools"
 	"github.com/docker/docker/pkg/parsers"
 	"github.com/docker/docker/pkg/platform"
@@ -219,7 +218,7 @@ func verifyDaemonSettings(config *config.Config) error {
 
 // checkSystem validates platform-specific requirements
 func checkSystem() error {
-	// Validate the OS version. Note that docker.exe must be manifested for this
+	// Validate the OS version. Note that dockerd.exe must be manifested for this
 	// call to return the correct version.
 	osv := system.GetOSVersion()
 	if osv.MajorVersion < 10 {
@@ -502,6 +501,7 @@ func (daemon *Daemon) runAsHyperVContainer(hostConfig *containertypes.HostConfig
 // conditionalMountOnStart is a platform specific helper function during the
 // container start to call mount.
 func (daemon *Daemon) conditionalMountOnStart(container *container.Container) error {
+
 	// Bail out now for Linux containers. We cannot mount the containers filesystem on the
 	// host as it is a non-Windows filesystem.
 	if system.LCOWSupported() && container.OS != "windows" {
@@ -519,6 +519,7 @@ func (daemon *Daemon) conditionalMountOnStart(container *container.Container) er
 // conditionalUnmountOnCleanup is a platform specific helper function called
 // during the cleanup of a container to unmount.
 func (daemon *Daemon) conditionalUnmountOnCleanup(container *container.Container) error {
+
 	// Bail out now for Linux containers
 	if system.LCOWSupported() && container.OS != "windows" {
 		return nil
@@ -647,16 +648,6 @@ func setupDaemonProcess(config *config.Config) error {
 
 func (daemon *Daemon) setupSeccompProfile() error {
 	return nil
-}
-
-func getRealPath(path string) (string, error) {
-	if system.IsIoTCore() {
-		// Due to https://github.com/golang/go/issues/20506, path expansion
-		// does not work correctly on the default IoT Core configuration.
-		// TODO @darrenstahlmsft remove this once golang/go/20506 is fixed
-		return path, nil
-	}
-	return fileutils.ReadSymlinkedDirectory(path)
 }
 
 func (daemon *Daemon) loadRuntimes() error {
